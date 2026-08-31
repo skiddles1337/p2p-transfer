@@ -16,8 +16,9 @@ import struct
 
 # --- Message types ---
 # Each is just a distinct integer (0-255, since we're using 1 byte).
-# We'll add more of these in later steps (FILE_OFFER, FILE_CHUNK, etc.)
 MSG_HELLO = 1
+MSG_FILE_OFFER = 2  # payload: filename, as UTF-8 bytes
+MSG_FILE_DATA = 3   # payload: the raw file content (whole file, for now)
 
 # struct format string for the header:
 #   "!" = big-endian (network byte order, the standard for network protocols)
@@ -41,6 +42,47 @@ def unpack_header(header_bytes: bytes) -> tuple[int, int]:
     """
     msg_type, payload_length = struct.unpack(HEADER_FORMAT, header_bytes)
     return msg_type, payload_length
+
+
+def recv_exact(sock, num_bytes: int) -> bytes:
+    """
+    Read exactly num_bytes from a socket, even if it takes multiple
+    recv() calls to get there.
+
+    A single sock.recv(n) call is only a REQUEST for up to n bytes -
+    the OS is free to hand back fewer, especially on slower or busier
+    connections. So we keep calling recv() in a loop, accumulating
+    bytes, until we've collected exactly what we asked for.
+    """
+    chunks = []
+    bytes_received = 0
+
+    while bytes_received < num_bytes:
+        remaining = num_bytes - bytes_received
+        chunk = sock.recv(remaining)
+
+        if chunk == b"":
+            # An empty result means the other side closed the connection.
+            raise ConnectionError(
+                f"Socket closed before receiving all data "
+                f"(got {bytes_received} of {num_bytes} bytes)"
+            )
+
+        chunks.append(chunk)
+        bytes_received += len(chunk)
+
+    return b"".join(chunks)
+
+
+def recv_message(sock) -> tuple[int, bytes]:
+    """
+    Read one full message (header + payload) from a socket.
+    Returns (msg_type, payload).
+    """
+    header_bytes = recv_exact(sock, HEADER_SIZE)
+    msg_type, payload_length = unpack_header(header_bytes)
+    payload = recv_exact(sock, payload_length)
+    return msg_type, payload
 
 
 if __name__ == "__main__":
