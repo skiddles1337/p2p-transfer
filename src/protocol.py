@@ -17,8 +17,20 @@ import struct
 # --- Message types ---
 # Each is just a distinct integer (0-255, since we're using 1 byte).
 MSG_HELLO = 1
-MSG_FILE_OFFER = 2  # payload: filename, as UTF-8 bytes
-MSG_FILE_DATA = 3   # payload: the raw file content (whole file, for now)
+MSG_FILE_OFFER = 2  # payload: filesize (8 bytes) + filename (UTF-8 bytes)
+MSG_FILE_DATA = 3   # payload: the raw file content (whole file) - being
+                     # replaced by chunked transfer, kept for reference
+MSG_FILE_CHUNK = 4  # payload: one piece of a file's bytes
+
+# How many bytes we read/send per chunk. 1 MB is a reasonable default -
+# big enough to be efficient, small enough to keep memory usage low
+# and give frequent progress/checkpoint opportunities.
+CHUNK_SIZE = 1024 * 1024
+
+# struct format just for the filesize field within a FILE_OFFER payload.
+# Same idea as the main header format, just reused for this sub-piece.
+FILE_OFFER_SIZE_FORMAT = "!Q"
+FILE_OFFER_SIZE_FIELD_LEN = struct.calcsize(FILE_OFFER_SIZE_FORMAT)  # 8
 
 # struct format string for the header:
 #   "!" = big-endian (network byte order, the standard for network protocols)
@@ -83,6 +95,33 @@ def recv_message(sock) -> tuple[int, bytes]:
     msg_type, payload_length = unpack_header(header_bytes)
     payload = recv_exact(sock, payload_length)
     return msg_type, payload
+
+
+def pack_file_offer(filename: str, filesize: int) -> bytes:
+    """
+    Build the payload for a FILE_OFFER message: a fixed-size filesize
+    field, followed by the filename (whatever's left over).
+
+    Putting the fixed-size field FIRST means the receiver always knows
+    exactly where it ends - the filename is simply "everything after
+    that point", no separate length field needed for it.
+    """
+    size_bytes = struct.pack(FILE_OFFER_SIZE_FORMAT, filesize)
+    filename_bytes = filename.encode("utf-8")
+    return size_bytes + filename_bytes
+
+
+def unpack_file_offer(payload: bytes) -> tuple[str, int]:
+    """
+    Given a FILE_OFFER payload, return (filename, filesize).
+    """
+    size_bytes = payload[:FILE_OFFER_SIZE_FIELD_LEN]
+    filename_bytes = payload[FILE_OFFER_SIZE_FIELD_LEN:]
+
+    (filesize,) = struct.unpack(FILE_OFFER_SIZE_FORMAT, size_bytes)
+    filename = filename_bytes.decode("utf-8")
+
+    return filename, filesize
 
 
 if __name__ == "__main__":

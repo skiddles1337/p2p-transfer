@@ -2,16 +2,16 @@
 listener.py
 
 Listens on a port, accepts ONE incoming connection, expects a
-FILE_OFFER message followed by a FILE_DATA message, and writes the
-received bytes to disk under received/<filename>.
+FILE_OFFER message (filename + total filesize) followed by a sequence
+of FILE_CHUNK messages, and writes the received bytes to disk under
+received/<filename>, stopping once the expected total size is reached.
 
-No chunking, hashing, or encryption yet - see sender.py for the
-matching notes on scope.
+No hashing or encryption yet - see protocol.py for what's coming next.
 """
 
 import socket
 import os
-from protocol import recv_message, MSG_FILE_OFFER, MSG_FILE_DATA
+from protocol import recv_message, unpack_file_offer, MSG_FILE_OFFER, MSG_FILE_CHUNK
 
 LISTEN_PORT = 5001
 SAVE_DIR = "received"
@@ -29,35 +29,41 @@ def main():
     print(f"Connection received from {addr}")
 
     with conn:
-        # First message: the file offer, telling us the filename.
+        # First message: the file offer, telling us filename + size.
         msg_type, payload = recv_message(conn)
         if msg_type != MSG_FILE_OFFER:
             print(f"Expected FILE_OFFER, got message type {msg_type}. Aborting.")
             return
 
-        filename = payload.decode("utf-8")
-        print(f"Received FILE_OFFER: '{filename}'")
+        filename, filesize = unpack_file_offer(payload)
+        print(f"Received FILE_OFFER: '{filename}', {filesize} bytes expected")
 
-        # Second message: the actual file content.
-        msg_type, payload = recv_message(conn)
-        if msg_type != MSG_FILE_DATA:
-            print(f"Expected FILE_DATA, got message type {msg_type}. Aborting.")
-            return
-
-        print(f"Received FILE_DATA - {len(payload)} bytes")
-
-        # Make sure the save directory exists, then write the file.
         os.makedirs(SAVE_DIR, exist_ok=True)
-
-        # os.path.basename strips any path info from the filename,
-        # just in case - we only ever want to write inside SAVE_DIR,
-        # never wherever the filename might otherwise point to.
         safe_filename = os.path.basename(filename)
         save_path = os.path.join(SAVE_DIR, safe_filename)
 
-        with open(save_path, "wb") as f:
-            f.write(payload)
+        # Now receive chunks until we've collected the full filesize.
+        # This mirrors the sender's loop: instead of "keep sending
+        # until the file is exhausted", it's "keep receiving until
+        # we've reached the size we were told to expect".
+        bytes_received = 0
+        chunk_count = 0
 
+        with open(save_path, "wb") as f:
+            while bytes_received < filesize:
+                msg_type, chunk_payload = recv_message(conn)
+
+                if msg_type != MSG_FILE_CHUNK:
+                    print(f"Expected FILE_CHUNK, got message type {msg_type}. Aborting.")
+                    return
+
+                f.write(chunk_payload)
+                bytes_received += len(chunk_payload)
+                chunk_count += 1
+                print(f"  Received chunk {chunk_count} ({len(chunk_payload)} bytes, "
+                      f"{bytes_received}/{filesize} total)")
+
+        print(f"Done receiving. {chunk_count} chunks, {bytes_received} bytes total.")
         print(f"Saved to {save_path}")
 
     server_socket.close()
