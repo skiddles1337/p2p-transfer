@@ -17,6 +17,8 @@ COMMANDS (methods on Engine):
     cancel_transfer(session_id, transfer_id_hex)
     respond_to_offer(offer_id, accept: bool)
     close_session(session_id)
+    get_state_snapshot() -> dict   (full current state - see below)
+    has_active_transfers() -> bool
 
 EVENTS (dicts pulled from engine.event_queue, each with a "type"):
     log                 {message}
@@ -161,6 +163,29 @@ class IncomingTransfer:
         self.output_file = open(data_path, "r+b")
 
 
+class OutgoingTransfer:
+    """
+    State for a file currently being sent on a session. Held as
+    session.active_outgoing - previously this was just a bare dict
+    with "transfer_id"/"cancel_event" and nothing else, meaning
+    progress (bytes sent so far) only ever existed as a local variable
+    inside _send_one_file's loop, with no way for anything outside
+    that function to ask "how far along is this?" Promoted to a real
+    object, mirroring IncomingTransfer, specifically so
+    get_state_snapshot() can describe outgoing progress just as
+    completely as incoming progress - an asymmetry that would
+    otherwise be a real, confusing gap for a GUI to work around.
+    """
+    def __init__(self, filename, filesize, transfer_id):
+        self.filename = filename
+        self.filesize = filesize
+        self.transfer_id = transfer_id
+        self.total_chunks = math.ceil(filesize / CHUNK_SIZE) if filesize > 0 else 0
+        self.start_time = time.monotonic()
+        self.bytes_sent = 0
+        self.cancel_event = threading.Event()
+
+
 class Session:
     """
     State for one connection to one peer. Each Session has its own
@@ -191,11 +216,11 @@ class Session:
         # (like a FILE_ACCEPT for our own outgoing offer) arriving
         # interleaved with it, without either one blocking the other.
         self.active_incoming = None
-        # The file CURRENTLY being sent on this session, if any - a
-        # dict with "transfer_id" and "cancel_event" (threading.Event).
-        # The send loop checks cancel_event between chunks; setting it
-        # (via cancel_transfer()) is how we ask an in-progress send to
-        # stop early.
+        # The file CURRENTLY being sent on this session, if any - an
+        # OutgoingTransfer instance (see above), or None. The send
+        # loop checks its cancel_event between chunks; setting that
+        # event (via cancel_transfer()) is how we ask an in-progress
+        # send to stop early.
         self.active_outgoing = None
         # Set once the handshake succeeds. For an INBOUND session,
         # this is whichever known_passphrases entry matched (i.e. who
@@ -211,6 +236,14 @@ class Engine:
         self.event_queue = queue.Queue()
         self.sessions = {}
         self.pending_incoming_offers = {}
+        # Guards mutations AND reads of the two dicts above -
+        # sessions come and go from multiple session threads
+        # concurrently, and get_state_snapshot() needs to iterate them
+        # safely without risking a "dictionary changed size during
+        # iteration" error if a session starts or ends mid-snapshot.
+        # Cheap insurance at this scale (a handful of sessions, never
+        # thousands) - not worth leaving to chance.
+        self._state_lock = threading.Lock()
 
         # {name: passphrase} - the set of passphrases this engine will
         # accept from an INCOMING connection. During a listener-side
@@ -326,7 +359,8 @@ class Engine:
     HANDSHAKE_TIMEOUT_SECONDS = 15
 
     def _run_session(self, session, as_listener, passphrase=None):
-        self.sessions[session.session_id] = session
+        with self._state_lock:
+            self.sessions[session.session_id] = session
         self._emit("session_started", session_id=session.session_id,
                    peer_addr=session.addr, direction=session.direction)
 
@@ -395,7 +429,8 @@ class Engine:
         except OSError:
             pass
         session.send_queue.put(None)  # sentinel: stop this session's sender thread
-        self.sessions.pop(session.session_id, None)
+        with self._state_lock:
+            self.sessions.pop(session.session_id, None)
         self._emit("session_closed", session_id=session.session_id, reason=reason)
 
     # ---------- the reader loop: one per session, fully FLAT dispatch ----------
@@ -452,7 +487,19 @@ class Engine:
         filename, filesize, transfer_id = unpack_file_offer(payload)
         offer_id = next(self._offer_id_counter)
         decision = PendingDecision()
-        self.pending_incoming_offers[offer_id] = (decision, session)
+
+        # Storing filename/filesize here (not just the decision +
+        # session) is what lets get_state_snapshot() fully describe a
+        # pending offer later - "someone wants to send you
+        # vacation.jpg, 2MB" - rather than only knowing an offer_id
+        # exists with no detail about what it actually is.
+        with self._state_lock:
+            self.pending_incoming_offers[offer_id] = {
+                "decision": decision,
+                "session": session,
+                "filename": filename,
+                "filesize": filesize,
+            }
 
         self._emit("file_offer_received", session_id=session.session_id,
                    offer_id=offer_id, filename=filename, filesize=filesize)
@@ -465,7 +512,8 @@ class Engine:
         # - not lost, just delayed, which is fine.
         decision.event.wait()
         accept = decision.result
-        self.pending_incoming_offers.pop(offer_id, None)
+        with self._state_lock:
+            self.pending_incoming_offers.pop(offer_id, None)
 
         self._send(session, MSG_FILE_ACCEPT if accept else MSG_FILE_REJECT, b"")
         self._emit("file_offer_answered", session_id=session.session_id,
@@ -489,8 +537,8 @@ class Engine:
         transfer). At most one of these will actually match, since
         transfer_id is randomly unique per transfer.
         """
-        if session.active_outgoing and session.active_outgoing["transfer_id"] == transfer_id_bytes:
-            session.active_outgoing["cancel_event"].set()
+        if session.active_outgoing and session.active_outgoing.transfer_id == transfer_id_bytes:
+            session.active_outgoing.cancel_event.set()
 
         if session.active_incoming and session.active_incoming.transfer_id == transfer_id_bytes:
             self._abort_incoming(session, reason="cancelled by peer")
@@ -723,10 +771,9 @@ class Engine:
         filename = sanitize_filename(os.path.basename(filepath))
         filesize = os.path.getsize(filepath)
         transfer_id = os.urandom(TRANSFER_ID_LEN)
-        total_chunks = math.ceil(filesize / CHUNK_SIZE) if filesize > 0 else 0
 
-        cancel_event = threading.Event()
-        session.active_outgoing = {"transfer_id": transfer_id, "cancel_event": cancel_event}
+        transfer = OutgoingTransfer(filename, filesize, transfer_id)
+        session.active_outgoing = transfer
 
         decision = PendingDecision()
         session.pending_outgoing_offer = decision
@@ -749,13 +796,11 @@ class Engine:
 
         whole_file_hasher = hashlib.sha256()
         chunk_index = 0
-        bytes_sent = 0
         cancelled = False
-        start_time = time.monotonic()
 
         with open(filepath, "rb") as f:
             while True:
-                if cancel_event.is_set():
+                if transfer.cancel_event.is_set():
                     cancelled = True
                     break
 
@@ -770,14 +815,14 @@ class Engine:
                 chunk_payload = pack_file_chunk(chunk_index, chunk_hash, encrypted_chunk)
                 self._send(session, MSG_FILE_CHUNK, chunk_payload)
 
-                bytes_sent += len(chunk)
+                transfer.bytes_sent += len(chunk)
                 bytes_per_second, eta_seconds = _compute_rate_and_eta(
-                    start_time, bytes_sent, filesize
+                    transfer.start_time, transfer.bytes_sent, filesize
                 )
                 self._emit("chunk_progress", session_id=session.session_id,
                            transfer_id=transfer_id.hex(), chunk_index=chunk_index,
-                           total_chunks=total_chunks, status="sent",
-                           bytes_transferred=bytes_sent, total_bytes=filesize,
+                           total_chunks=transfer.total_chunks, status="sent",
+                           bytes_transferred=transfer.bytes_sent, total_bytes=filesize,
                            bytes_per_second=bytes_per_second, eta_seconds=eta_seconds)
                 chunk_index += 1
 
@@ -814,8 +859,8 @@ class Engine:
             self._emit("log", message=f"Invalid transfer_id for cancel: {transfer_id_hex}")
             return
 
-        if session.active_outgoing and session.active_outgoing["transfer_id"] == transfer_id:
-            session.active_outgoing["cancel_event"].set()
+        if session.active_outgoing and session.active_outgoing.transfer_id == transfer_id:
+            session.active_outgoing.cancel_event.set()
             return
 
         if session.active_incoming and session.active_incoming.transfer_id == transfer_id:
@@ -830,13 +875,117 @@ class Engine:
                                   f"to cancel on session {session_id}")
 
     def respond_to_offer(self, offer_id, accept):
-        entry = self.pending_incoming_offers.get(offer_id)
+        with self._state_lock:
+            entry = self.pending_incoming_offers.get(offer_id)
         if entry is None:
             self._emit("log", message=f"No pending offer with id {offer_id}")
             return
-        decision, _session = entry
+        decision = entry["decision"]
         decision.result = accept
         decision.event.set()
+
+    def _transfer_progress_dict(self, transfer, start_time, bytes_done, status_field_name, status_value):
+        """
+        Shared shape-builder for describing an in-progress transfer,
+        used by BOTH the incoming and outgoing branches of a session
+        snapshot. Deliberately uses the SAME field names as the
+        chunk_progress EVENT (bytes_transferred, total_bytes,
+        bytes_per_second, eta_seconds) - so a frontend can render a
+        transfer row identically whether it was first drawn from a
+        snapshot or updated by a live event, without needing two
+        different code paths for what is conceptually the same data.
+        """
+        bytes_per_second, eta_seconds = _compute_rate_and_eta(
+            start_time, bytes_done, transfer.filesize
+        )
+        return {
+            "transfer_id": transfer.transfer_id.hex(),
+            "filename": transfer.filename,
+            "total_chunks": transfer.total_chunks,
+            "bytes_transferred": bytes_done,
+            "total_bytes": transfer.filesize,
+            "bytes_per_second": bytes_per_second,
+            "eta_seconds": eta_seconds,
+            status_field_name: status_value,
+        }
+
+    def _session_snapshot(self, session) -> dict:
+        """
+        Build a full, JSON-serializable description of ONE session -
+        the per-session piece of get_state_snapshot() below.
+        """
+        info = {
+            "session_id": session.session_id,
+            "peer_addr": session.addr,
+            "direction": session.direction,
+            "peer_name": session.peer_name,
+            "handshake_complete": session.cipher is not None,
+            "active_incoming": None,
+            "active_outgoing": None,
+        }
+
+        incoming = session.active_incoming
+        if incoming is not None:
+            info["active_incoming"] = self._transfer_progress_dict(
+                incoming, incoming.start_time, incoming.bytes_processed,
+                "chunks_failed", len(incoming.failed_chunk_indices),
+            )
+
+        outgoing = session.active_outgoing
+        if outgoing is not None:
+            info["active_outgoing"] = self._transfer_progress_dict(
+                outgoing, outgoing.start_time, outgoing.bytes_sent,
+                "cancelled", outgoing.cancel_event.is_set(),
+            )
+
+        return info
+
+    def get_state_snapshot(self) -> dict:
+        """
+        Returns a full, JSON-serializable description of everything
+        the engine currently knows: whether listening (and on what
+        port), every active session (identity, handshake state, and
+        any in-progress transfer's live progress), and every pending
+        incoming offer still awaiting a decision.
+
+        WHY THIS EXISTS: every other way of learning what the engine
+        is doing is the one-shot event queue - fine for a frontend
+        that's been listening continuously since the engine started,
+        but insufficient the moment a frontend needs to REBUILD its
+        display from a blank slate (a page reload, a websocket
+        reconnecting after a hiccup, a GUI window reopening) without
+        having seen every event that led to the current state. Events
+        remain the mechanism for "something just happened, update
+        incrementally"; this is the mechanism for "tell me everything,
+        right now."
+
+        Thread-safe: takes a stable, lock-protected copy of sessions
+        and pending offers before building the description, so this
+        can't race with a session starting or ending concurrently.
+        """
+        with self._state_lock:
+            session_list = list(self.sessions.values())
+            offer_items = list(self.pending_incoming_offers.items())
+
+        sessions_snapshot = [self._session_snapshot(s) for s in session_list]
+
+        offers_snapshot = [
+            {
+                "offer_id": offer_id,
+                "session_id": entry["session"].session_id,
+                "filename": entry["filename"],
+                "filesize": entry["filesize"],
+            }
+            for offer_id, entry in offer_items
+        ]
+
+        return {
+            "listening": self.listening_port is not None,
+            "listening_port": self.listening_port,
+            "sessions": sessions_snapshot,
+            "pending_offers": offers_snapshot,
+            "known_contact_names": sorted(self.known_passphrases.keys()),
+        }
 
     def has_active_transfers(self) -> bool:
         """

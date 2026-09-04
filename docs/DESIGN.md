@@ -763,6 +763,67 @@ state:**
    sends correctly (zero `FILE_CHUNK` messages, straight to `DONE`)
    and lands correctly as a genuine 0-byte file at the destination.
 
+## State snapshot: `Engine.get_state_snapshot()` (implemented)
+
+Every other way of learning what the engine is doing is the one-shot
+event queue - fine for a frontend that's been listening continuously
+since the engine started, but insufficient the moment a frontend needs
+to REBUILD its display from a blank slate (a page reload, a websocket
+reconnecting after a hiccup, a GUI window reopening) without having
+seen every event that led to the current state. `get_state_snapshot()`
+returns a full, JSON-serializable description of everything the engine
+currently knows - listening status, every active session (identity,
+handshake state), any in-progress transfer's live progress, and every
+pending incoming offer still awaiting a decision. Events remain the
+mechanism for "something just happened, update incrementally"; this is
+the mechanism for "tell me everything, right now."
+
+**Two more real gaps found while designing this** (same category as
+everything above - state that events describe once but was never
+actually persisted anywhere a later snapshot could read):
+
+- **Outgoing transfer progress didn't exist as queryable state at
+  all** - it was a local variable inside `_send_one_file`'s loop.
+  Fixed by promoting it to a real `OutgoingTransfer` object (mirroring
+  `IncomingTransfer`), held as `session.active_outgoing`, so a
+  snapshot can describe send progress just as completely as receive
+  progress - previously an asymmetric, confusing gap.
+- **Pending incoming offers didn't remember their own filename/
+  filesize** - `pending_incoming_offers` stored only a decision +
+  session, so a snapshot taken while an offer was still awaiting a
+  human's decision couldn't describe WHAT was being offered, only
+  that some offer existed. Fixed by expanding each entry to a small
+  dict including `filename`/`filesize`, captured at the moment the
+  offer arrives.
+
+**Thread safety:** `sessions` and `pending_incoming_offers` are
+mutated from multiple session threads concurrently as connections come
+and go - a snapshot iterating either dict without protection risks a
+"dictionary changed size during iteration" crash. Both are now guarded
+by a single `Engine._state_lock`. Verified under real concurrent
+load: 500 rapid snapshot calls while 20 sessions connected
+concurrently in a separate thread - zero errors.
+
+**Consistent field shapes:** both `active_incoming`/`active_outgoing`
+in the snapshot and the live `chunk_progress` EVENT use identical field
+names (`bytes_transferred`, `total_bytes`, `bytes_per_second`,
+`eta_seconds`) via a shared `_transfer_progress_dict()` helper - a
+frontend can render a transfer row the same way regardless of whether
+it was first drawn from a snapshot or updated by a subsequent live
+event, with no special-casing needed.
+
+**Privacy note:** `known_contact_names` in the snapshot exposes only
+contact NAMES, never the actual passphrase values - deliberate, since
+a snapshot might end up in a browser dev console or a log at some
+point, and passphrases have no business appearing there.
+
+Verified end-to-end (not just unit-level): idle state, a pending offer
+correctly showing its real filename/filesize, and mid-transfer
+snapshots on BOTH sides of a real connection simultaneously - sender's
+`active_outgoing` and receiver's `active_incoming` both populated,
+correctly showing different byte-progress at the same instant (network
+delay), both consistent with the shared field shape.
+
 ## GUI next steps (not yet designed)
 Layout, the concrete event→frontend wiring mechanism (websocket vs.
 pywebview's JS bridge), and the connection-string UI flow itself still
