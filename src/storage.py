@@ -25,6 +25,68 @@ import json
 
 STAGING_DIR = os.path.join("received", ".partial")
 
+# Characters forbidden in filenames on Windows (some are also awkward
+# elsewhere). We replace rather than reject outright, so a peer
+# sending an unusual filename doesn't crash the transfer - it just
+# lands with a slightly modified name.
+_ILLEGAL_FILENAME_CHARS = '<>:"/\\|?*'
+
+
+def sanitize_filename(filename: str) -> str:
+    """
+    Turn a filename received from a peer into something safe to
+    actually create on disk, regardless of platform.
+
+    Beyond the path-traversal stripping we already did (basename), a
+    filename could still contain characters Windows forbids entirely
+    in file names (: * ? " < > | and friends), or forbidden trailing
+    characters (Windows disallows a filename ending in a space or a
+    dot). None of this is exploitable in a dangerous way, but left
+    unhandled it would surface as a confusing OSError when we tried to
+    create the file - bad experience for something that's about to be
+    GUI-facing and receiving files from a less controlled source.
+    """
+    name = os.path.basename(filename)
+
+    cleaned_chars = []
+    for ch in name:
+        if ch in _ILLEGAL_FILENAME_CHARS or ord(ch) < 32:
+            cleaned_chars.append("_")
+        else:
+            cleaned_chars.append(ch)
+    cleaned = "".join(cleaned_chars)
+
+    # Windows disallows filenames ending in a space or a dot.
+    cleaned = cleaned.rstrip(" .")
+
+    # If sanitizing left us with nothing usable (e.g. the whole name
+    # was illegal characters), fall back to a generic placeholder
+    # rather than trying to create a file with an empty name.
+    if not cleaned:
+        cleaned = "unnamed_file"
+
+    return cleaned
+
+
+def preallocate_file(path: str, filesize: int) -> None:
+    """
+    Create a file of exactly `filesize` bytes, filled with zeros.
+
+    Seeking to the last byte and writing a single zero forces the
+    filesystem to commit to a file of that final size right away -
+    this makes an out-of-disk-space condition fail immediately and
+    clearly, rather than partway through a large transfer, and it's
+    what makes safe random-offset chunk writes possible at all.
+    """
+    parent_dir = os.path.dirname(path)
+    if parent_dir:
+        os.makedirs(parent_dir, exist_ok=True)
+
+    with open(path, "wb") as f:
+        if filesize > 0:
+            f.seek(filesize - 1)
+            f.write(b"\x00")
+
 
 def staging_paths(transfer_id: bytes) -> tuple[str, str]:
     """
