@@ -13,6 +13,7 @@ and back again. It knows nothing about sockets or files yet.
 """
 
 import struct
+import hashlib
 
 # --- Message types ---
 # Each is just a distinct integer (0-255, since we're using 1 byte).
@@ -20,7 +21,11 @@ MSG_HELLO = 1
 MSG_FILE_OFFER = 2  # payload: filesize (8 bytes) + filename (UTF-8 bytes)
 MSG_FILE_DATA = 3   # payload: the raw file content (whole file) - being
                      # replaced by chunked transfer, kept for reference
-MSG_FILE_CHUNK = 4  # payload: one piece of a file's bytes
+MSG_FILE_CHUNK = 4  # payload: chunk index (4 bytes) + chunk hash (32 bytes)
+                     # + chunk data (remaining bytes)
+MSG_DONE = 5        # payload: SHA-256 hash of the ENTIRE file (32 bytes) -
+                     # sent once, after all chunks, to signal "that's
+                     # everything" and let the receiver do a final check
 
 # How many bytes we read/send per chunk. 1 MB is a reasonable default -
 # big enough to be efficient, small enough to keep memory usage low
@@ -31,6 +36,16 @@ CHUNK_SIZE = 1024 * 1024
 # Same idea as the main header format, just reused for this sub-piece.
 FILE_OFFER_SIZE_FORMAT = "!Q"
 FILE_OFFER_SIZE_FIELD_LEN = struct.calcsize(FILE_OFFER_SIZE_FORMAT)  # 8
+
+# struct format for the chunk index field within a FILE_CHUNK payload.
+# "I" = 4-byte unsigned int - plenty of range (over 4 billion chunks,
+# which at 1MB each is far more data than we'll ever realistically send).
+CHUNK_INDEX_FORMAT = "!I"
+CHUNK_INDEX_LEN = struct.calcsize(CHUNK_INDEX_FORMAT)  # 4
+
+# SHA-256 hashes are always exactly 32 bytes, regardless of input size.
+# We can ask hashlib itself for this number rather than hardcoding it.
+CHUNK_HASH_LEN = hashlib.sha256().digest_size  # 32
 
 # struct format string for the header:
 #   "!" = big-endian (network byte order, the standard for network protocols)
@@ -122,6 +137,40 @@ def unpack_file_offer(payload: bytes) -> tuple[str, int]:
     filename = filename_bytes.decode("utf-8")
 
     return filename, filesize
+
+
+def pack_file_chunk(chunk_index: int, chunk_data: bytes) -> bytes:
+    """
+    Build the payload for a FILE_CHUNK message:
+
+        [ 4 bytes  : chunk index ]
+        [ 32 bytes : SHA-256 hash of chunk_data ]
+        [ remaining bytes : chunk_data itself ]
+
+    The index lets both sides refer to "chunk #7" unambiguously (useful
+    later for requesting a specific chunk be resent). The hash lets the
+    receiver verify this specific chunk arrived intact.
+    """
+    index_bytes = struct.pack(CHUNK_INDEX_FORMAT, chunk_index)
+    chunk_hash = hashlib.sha256(chunk_data).digest()
+    return index_bytes + chunk_hash + chunk_data
+
+
+def unpack_file_chunk(payload: bytes) -> tuple[int, bytes, bytes]:
+    """
+    Given a FILE_CHUNK payload, return (chunk_index, chunk_hash, chunk_data).
+
+    Note: this does NOT verify the hash - it just splits the payload
+    into its three parts. Verifying is the caller's job (compare
+    chunk_hash against hashlib.sha256(chunk_data).digest()).
+    """
+    index_bytes = payload[:CHUNK_INDEX_LEN]
+    hash_bytes = payload[CHUNK_INDEX_LEN:CHUNK_INDEX_LEN + CHUNK_HASH_LEN]
+    chunk_data = payload[CHUNK_INDEX_LEN + CHUNK_HASH_LEN:]
+
+    (chunk_index,) = struct.unpack(CHUNK_INDEX_FORMAT, index_bytes)
+
+    return chunk_index, hash_bytes, chunk_data
 
 
 if __name__ == "__main__":
