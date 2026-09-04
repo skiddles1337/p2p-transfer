@@ -42,6 +42,12 @@ from storage import staging_paths, write_manifest, finalize_transfer, STAGING_DI
 LISTEN_PORT = 5001
 SAVE_DIR = "received"
 
+# How long to wait for a connection before giving up, in seconds. This
+# ONLY applies while waiting for someone to connect - once a session
+# is underway, this timeout is turned off (see main()), so a slow but
+# active transfer is never killed just for taking a while.
+IDLE_TIMEOUT_SECONDS = 10
+
 
 def preallocate_file(path: str, filesize: int) -> None:
     with open(path, "wb") as f:
@@ -200,15 +206,38 @@ def main():
     server_socket.bind(("0.0.0.0", LISTEN_PORT))
     server_socket.listen(1)
 
-    print(f"Listening on port {LISTEN_PORT}...")
+    # This makes accept() give up and raise socket.timeout after this
+    # many seconds of no connection, instead of blocking forever. This
+    # is what makes it POSSIBLE to ever notice "nothing's happening,
+    # should I stop?" - a truly blocking accept() can't be interrupted
+    # at all. This is also exactly the mechanism a future GUI's "Stop
+    # Listening" button would rely on: same idea, just checking a
+    # button-driven flag instead of a fixed time limit.
+    server_socket.settimeout(IDLE_TIMEOUT_SECONDS)
 
-    # Outer loop: after each session ends, go back to waiting for the
-    # next connection, rather than exiting the program.
+    print(f"Listening on port {LISTEN_PORT} "
+          f"(will stop after {IDLE_TIMEOUT_SECONDS}s with no connection)...")
+
     while True:
-        conn, addr = server_socket.accept()
+        try:
+            conn, addr = server_socket.accept()
+        except socket.timeout:
+            print(f"No connection received in {IDLE_TIMEOUT_SECONDS} seconds. Stopping.")
+            break
+
+        # Once a real connection comes in, we don't want THIS timeout
+        # applying to it - a slow file transfer isn't "idle", and
+        # shouldn't get killed just for taking a while. Sockets
+        # returned by accept() have their own independent timeout
+        # setting, separate from the listening socket's, so this only
+        # affects the one connection we're about to handle.
+        conn.settimeout(None)
+
         with conn:
             handle_session(conn, addr)
         print("Session closed. Waiting for next connection...\n")
+
+    server_socket.close()
 
 
 if __name__ == "__main__":
