@@ -12,15 +12,16 @@ auto-accepting scenarios) - a good sanity check before building
 anything more elaborate (like a GUI) on top of the same engine.
 
 Commands:
-  listen <port>              start listening for connections
-  stoplisten                 stop listening for new connections
-  connect <ip> <port>        connect to a peer
-  send <session_id> <path>   offer a file on an existing session
-  accept <offer_id>          accept a pending incoming file offer
-  reject <offer_id>          reject a pending incoming file offer
-  sessions                   list active sessions
-  help                       show this help
-  quit                       exit
+  listen <port>                       start listening for connections
+  stoplisten                          stop listening for new connections
+  trust <name> <passphrase>           accept incoming connections using this passphrase, identified as <name>
+  connect <ip> <port> <passphrase> [name]   connect to a peer
+  send <session_id> <path>            offer a file on an existing session
+  accept <offer_id>                   accept a pending incoming file offer
+  reject <offer_id>                   reject a pending incoming file offer
+  sessions                            list active sessions
+  help                                show this help
+  quit                                exit
 """
 
 import threading
@@ -49,7 +50,8 @@ def print_events(engine: Engine) -> None:
 
         elif etype == "handshake_result":
             if event["success"]:
-                print(f"[session {event['session_id']}] handshake OK")
+                name_info = f" (identified as '{event['peer_name']}')" if event.get("peer_name") else ""
+                print(f"[session {event['session_id']}] handshake OK{name_info}")
             else:
                 print(f"[session {event['session_id']}] handshake FAILED: {event['reason']}")
 
@@ -84,15 +86,16 @@ def print_events(engine: Engine) -> None:
 def print_help() -> None:
     print("""
 Commands:
-  listen <port>              start listening for connections
-  stoplisten                 stop listening for new connections
-  connect <ip> <port>        connect to a peer
-  send <session_id> <path>   offer a file on an existing session
-  accept <offer_id>          accept a pending incoming file offer
-  reject <offer_id>          reject a pending incoming file offer
-  sessions                   list active sessions
-  help                       show this help
-  quit                       exit
+  listen <port>                       start listening for connections
+  stoplisten                          stop listening for new connections
+  trust <name> <passphrase>           accept incoming connections using this passphrase, identified as <name>
+  connect <ip> <port> <passphrase> [name]   connect to a peer
+  send <session_id> <path>            offer a file on an existing session
+  accept <offer_id>                   accept a pending incoming file offer
+  reject <offer_id>                   reject a pending incoming file offer
+  sessions                            list active sessions
+  help                                show this help
+  quit                                exit
 """)
 
 
@@ -121,9 +124,20 @@ def main() -> None:
             elif cmd == "stoplisten":
                 engine.stop_listening()
 
+            elif cmd == "trust":
+                # trust <name> <passphrase> - register a passphrase
+                # this engine will accept from an INCOMING connection,
+                # identified afterward by this name.
+                name, passphrase = parts[1], parts[2]
+                engine.set_known_passphrase(name, passphrase)
+                print(f"Now accepting incoming connections using passphrase "
+                      f"for '{name}'.")
+
             elif cmd == "connect":
-                ip, port = parts[1], int(parts[2])
-                session_id = engine.connect_to_peer(ip, port)
+                # connect <ip> <port> <passphrase> [name]
+                ip, port, passphrase = parts[1], int(parts[2]), parts[3]
+                peer_name = parts[4] if len(parts) > 4 else None
+                session_id = engine.connect_to_peer(ip, port, passphrase, peer_name)
                 print(f"Connecting... assigned session id {session_id}")
 
             elif cmd == "send":
@@ -141,7 +155,8 @@ def main() -> None:
                 if not engine.sessions:
                     print("No active sessions.")
                 for sid, session in engine.sessions.items():
-                    print(f"  session {sid}: {session.addr} ({session.direction})")
+                    print(f"  session {sid}: {session.addr} ({session.direction}) "
+                          f"peer_name={session.peer_name}")
 
             elif cmd in ("help", "?"):
                 print_help()
