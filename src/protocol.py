@@ -17,8 +17,10 @@ import hashlib
 
 # --- Message types ---
 # Each is just a distinct integer (0-255, since we're using 1 byte).
-MSG_HELLO = 1
-MSG_FILE_OFFER = 2  # payload: filesize (8 bytes) + filename (UTF-8 bytes)
+MSG_HELLO = 1       # payload: 16 random bytes (a "challenge"), sent by
+                     # the listener immediately after accepting a
+                     # connection - see the handshake docs in sender.py
+MSG_FILE_OFFER = 2  # payload: filesize (8) + transfer_id (16) + filename
 MSG_FILE_DATA = 3   # payload: the raw file content (whole file) - being
                      # replaced by chunked transfer, kept for reference
 MSG_FILE_CHUNK = 4  # payload: chunk index (4 bytes) + chunk hash (32 bytes)
@@ -26,6 +28,22 @@ MSG_FILE_CHUNK = 4  # payload: chunk index (4 bytes) + chunk hash (32 bytes)
 MSG_DONE = 5        # payload: SHA-256 hash of the ENTIRE file (32 bytes) -
                      # sent once, after all chunks, to signal "that's
                      # everything" and let the receiver do a final check
+MSG_HELLO_RESPONSE = 6  # payload: HMAC-SHA256(challenge, key=passphrase) -
+                         # proves the sender knows the passphrase WITHOUT
+                         # ever transmitting the passphrase itself
+MSG_HELLO_OK = 7        # payload: empty - handshake succeeded
+MSG_HELLO_REJECT = 8    # payload: empty - handshake failed, connection
+                         # will close right after this is sent
+MSG_FILE_ACCEPT = 9     # payload: empty - receiver agreed to this FILE_OFFER
+MSG_FILE_REJECT = 10    # payload: empty - receiver declined this FILE_OFFER
+MSG_BYE = 11            # payload: empty - sender signals no more files,
+                         # session is ending
+
+# Size of the random challenge sent in MSG_HELLO, and of the HMAC-SHA256
+# response to it. Both are fixed sizes, so no length-prefix needed for
+# these payloads - they're used as-is.
+CHALLENGE_LEN = 16
+HELLO_RESPONSE_LEN = 32  # HMAC-SHA256 always produces a 32-byte digest
 
 # How many bytes we read/send per chunk. 1 MB is a reasonable default -
 # big enough to be efficient, small enough to keep memory usage low
