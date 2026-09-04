@@ -656,6 +656,33 @@ that wouldn't otherwise happen. Verified: correctly False before/after
 a transfer, True while one is genuinely in progress, on both sides of
 a real connection.
 
+**Field "what's actually being used" confirmation - Name/IP/Port
+treated differently, since each has a different relationship to live
+state:**
+- **Port:** genuinely tricky - editing the text field does NOT
+  retroactively change what's actually listening; only calling
+  `start_listening()` again does. Fixed at the engine level:
+  `Engine.listening_port` (implemented) is the source of truth the
+  GUI should display via a separate status badge (e.g. "● Listening
+  on 5001"), NOT by echoing the live text field - so an edited-but-
+  not-yet-applied port is visibly distinct from what's actually bound.
+  Returns `None` when not listening. Verified: correctly stays at the
+  old port while the field is edited without restarting, and clears
+  to `None` immediately (not after a delay) on `stop_listening()` -
+  an actual timing bug was caught and fixed here, since the property
+  was originally only cleared by the background accept thread noticing
+  on its own ~1-second timeout cycle.
+- **IP:** a stale value doesn't break YOUR listening (binding is
+  always all-interfaces) - it silently breaks things for whoever you
+  hand a connection string to, a worse failure mode since you're not
+  the one who feels the symptom. Plan: tag the field as "Auto-detected
+  just now" vs. "Manually entered," with a refresh icon to re-run
+  `network_info.get_public_ip()` on demand.
+- **Name:** no live-state concern (not tied to anything currently
+  running) - just needs the standard auto-save-with-brief-confirmation
+  pattern (save on blur/pause, a momentary checkmark/flash), same as
+  any other persistent preference field.
+
 ## GUI next steps (not yet designed)
 Layout, the concrete event→frontend wiring mechanism (websocket vs.
 pywebview's JS bridge), and the connection-string UI flow itself still

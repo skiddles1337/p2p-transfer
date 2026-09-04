@@ -228,6 +228,7 @@ class Engine:
         self._listen_socket = None
         self._listen_thread = None
         self._stop_listening_flag = threading.Event()
+        self._listening_port = None
 
     def set_known_passphrase(self, name, passphrase):
         """Register (or update) a passphrase this engine should accept
@@ -601,6 +602,7 @@ class Engine:
         srv.listen(5)
         srv.settimeout(1.0)
         self._listen_socket = srv
+        self._listening_port = port
         self._emit("log", message=f"Listening on port {port}...")
 
         def accept_loop():
@@ -620,6 +622,13 @@ class Engine:
                     target=self._run_session, args=(session, True), daemon=True
                 ).start()
 
+            # Whatever caused this loop to exit - an explicit
+            # stop_listening() call, or the socket erroring out for
+            # some other reason - we're no longer actually listening,
+            # so this must be cleared here rather than only in
+            # stop_listening(). Otherwise listening_port could keep
+            # reporting a port we've silently stopped listening on.
+            self._listening_port = None
             try:
                 srv.close()
             except OSError:
@@ -630,12 +639,31 @@ class Engine:
 
     def stop_listening(self):
         self._stop_listening_flag.set()
+        # Clear this immediately - we KNOW right now that we're
+        # intentionally stopping, so there's no reason to wait for the
+        # background accept thread to notice on its own timeout cycle
+        # (which could take up to a second, during which listening_port
+        # would misleadingly still report the old port as active).
+        self._listening_port = None
         if self._listen_socket is not None:
             try:
                 self._listen_socket.close()
             except OSError:
                 pass
         self._emit("log", message="Stopped listening.")
+
+    @property
+    def listening_port(self):
+        """
+        The port ACTUALLY currently being listened on, or None if not
+        listening. This is the source of truth the GUI should check
+        before trusting its own port input field - editing that field
+        does NOT retroactively change what's actually listening; only
+        calling start_listening() again does. A GUI showing "Listening
+        on 5001" should read this property, not just echo back
+        whatever the text field currently contains.
+        """
+        return self._listening_port
 
     def connect_to_peer(self, ip, port, passphrase, peer_name=None):
         """
