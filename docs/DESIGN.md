@@ -656,6 +656,34 @@ that wouldn't otherwise happen. Verified: correctly False before/after
 a transfer, True while one is genuinely in progress, on both sides of
 a real connection.
 
+**Settings screen (planned) - default save location (implemented
+now).** `storage.py`: `get_save_dir()` / `set_save_dir(path)` /
+`reset_save_dir()`, persisted in their own small config file, checked
+at the POINT OF USE (not a cached constant) so a change takes effect
+immediately without restarting the app. `get_staging_dir()` is always
+computed FROM the current effective save dir, so an override moves
+"Partial Downloads" along with it automatically - staying co-located
+with finished downloads remains true regardless of where that actually
+is. `set_save_dir()` attempts to create the directory immediately
+(raises `OSError` on failure) so a Settings screen can show a clear
+error right away, rather than the person discovering a bad folder
+choice mid-transfer later. Verified: override applies, staging follows
+it, survives a simulated restart, reset correctly reverts to default,
+and a full real transfer correctly lands in the overridden location.
+
+Other Settings screen candidates discussed (not yet built - genuinely
+good fits, but smaller/deferred until Settings UI exists): auto-accept
+from trusted contacts (opt-in per-contact, not a global switch),
+notification on/off, theme, auto-start-listening-on-launch, clear all
+data, export/import contacts. Explicitly deprioritized: bandwidth
+throttling (needs real rate-limiting logic, not just a toggle) and
+minimize-to-tray (a bigger OS-integration feature than a settings
+toggle). Explicitly excluded from exposing at all: chunk size
+(internal implementation detail, no real user benefit, real risk of
+confusing failure modes if "tuned"), language/locale (overkill for a
+friends-only tool), log verbosity (the Details panel already covers
+this need).
+
 **Field "what's actually being used" confirmation - Name/IP/Port
 treated differently, since each has a different relationship to live
 state:**

@@ -28,16 +28,24 @@ which a normal user often can't even write to, or some unpredictable
 temp extraction folder). We now use `platformdirs` to find a proper,
 OS-appropriate Downloads location instead:
 
-  - SAVE_DIR: where FINISHED files actually land - under the user's
+  - DEFAULT_SAVE_DIR: the built-in default - under the user's
     Downloads folder, in a "P2P Transfer" subfolder, since that's
     where people already expect to find things a program downloaded
     for them, same idea as a web browser's downloads.
-  - STAGING_DIR: in-progress transfers and their manifests. Previously
-    this was a hidden, internal app-data location - but in-progress
-    downloads are genuinely interesting to see (their existence is
-    what a future "resume" feature will build on), so this now lives
-    right alongside finished downloads, in a visible "Partial
-    Downloads" subfolder - browsable, not hidden away.
+  - get_save_dir() / set_save_dir() / reset_save_dir(): the actual
+    EFFECTIVE save location can be overridden (e.g. a Settings screen
+    letting someone pick a different folder) - the override persists
+    across restarts, in its own small config file. get_staging_dir()
+    is always computed FROM the current effective save dir (as a
+    "Partial Downloads" subfolder within it), so an override moves
+    staging along with it automatically - staying co-located with
+    finished downloads is a deliberate design choice (see below), not
+    just an accident of the default path.
+  - In-progress transfers and their manifests live in "Partial
+    Downloads" rather than a hidden, internal app-data location -
+    in-progress downloads are genuinely interesting to see (their
+    existence is what a future "resume" feature will build on), so
+    this is browsable, not hidden away.
 """
 
 import os
@@ -46,8 +54,69 @@ import platformdirs
 
 APP_NAME = "p2p-transfer"
 
-SAVE_DIR = os.path.join(platformdirs.user_downloads_dir(), "P2P Transfer")
-STAGING_DIR = os.path.join(SAVE_DIR, "Partial Downloads")
+DEFAULT_SAVE_DIR = os.path.join(platformdirs.user_downloads_dir(), "P2P Transfer")
+
+# Where we persist a save-dir override, if the person has set one via
+# a Settings screen. Separate tiny file rather than folding into
+# contacts.json/history.json, since this is a distinct concern (app
+# configuration, not saved relationships or activity records).
+_SAVE_DIR_CONFIG_PATH = os.path.join(
+    platformdirs.user_config_dir(APP_NAME, appauthor=False), "storage_settings.json"
+)
+
+
+def _load_save_dir_override():
+    """Return the overridden save dir, or None if using the default."""
+    if not os.path.exists(_SAVE_DIR_CONFIG_PATH):
+        return None
+    with open(_SAVE_DIR_CONFIG_PATH, "r") as f:
+        data = json.load(f)
+    return data.get("save_dir_override")
+
+
+def get_save_dir() -> str:
+    """
+    The CURRENTLY EFFECTIVE save directory - the override if one has
+    been set, otherwise DEFAULT_SAVE_DIR. This is what all storage
+    functions should call at the point of use, NOT a cached constant -
+    an override set while the app is running should take effect
+    immediately, without needing a restart.
+    """
+    override = _load_save_dir_override()
+    return override if override else DEFAULT_SAVE_DIR
+
+
+def set_save_dir(path: str) -> None:
+    """
+    Set a save directory override, persisted across restarts. Attempts
+    to create the directory immediately (rather than waiting until the
+    next file is saved) specifically so a Settings screen can show a
+    clear error right away if the chosen folder isn't usable (e.g. no
+    write permission), instead of the person only discovering that
+    later, mid-transfer. Raises OSError on failure - callers should
+    catch this and show it, not let it propagate as a crash.
+    """
+    os.makedirs(path, exist_ok=True)  # raises OSError if not usable
+
+    parent_dir = os.path.dirname(_SAVE_DIR_CONFIG_PATH)
+    os.makedirs(parent_dir, exist_ok=True)
+    with open(_SAVE_DIR_CONFIG_PATH, "w") as f:
+        json.dump({"save_dir_override": path}, f, indent=2)
+
+
+def reset_save_dir() -> None:
+    """Clear any override, reverting to DEFAULT_SAVE_DIR."""
+    if os.path.exists(_SAVE_DIR_CONFIG_PATH):
+        os.remove(_SAVE_DIR_CONFIG_PATH)
+
+
+def get_staging_dir() -> str:
+    """
+    Where in-progress transfers and their manifests live - always
+    computed FROM the current effective save dir (see get_save_dir()),
+    so a save-dir override moves staging along with it.
+    """
+    return os.path.join(get_save_dir(), "Partial Downloads")
 
 # Characters forbidden in filenames on Windows (some are also awkward
 # elsewhere). We replace rather than reject outright, so a peer
@@ -127,8 +196,9 @@ def staging_paths(transfer_id: bytes, filename: str) -> tuple[str, str]:
     without needing any separate collision-detection logic.
     """
     hex_id = transfer_id.hex()
-    data_path = os.path.join(STAGING_DIR, f"{filename}.{hex_id}.part")
-    manifest_path = os.path.join(STAGING_DIR, f"{filename}.{hex_id}.json")
+    staging_dir = get_staging_dir()
+    data_path = os.path.join(staging_dir, f"{filename}.{hex_id}.part")
+    manifest_path = os.path.join(staging_dir, f"{filename}.{hex_id}.json")
     return data_path, manifest_path
 
 

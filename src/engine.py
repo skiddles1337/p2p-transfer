@@ -100,8 +100,7 @@ from storage import (
     finalize_transfer,
     preallocate_file,
     sanitize_filename,
-    STAGING_DIR,
-    SAVE_DIR,
+    get_save_dir,
 )
 
 
@@ -579,7 +578,7 @@ class Engine:
             success = False
         else:
             final_path = finalize_transfer(transfer.data_path, transfer.manifest_path,
-                                           SAVE_DIR, transfer.safe_filename)
+                                           get_save_dir(), transfer.safe_filename)
             detail = final_path
             success = True
 
