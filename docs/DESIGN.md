@@ -40,10 +40,11 @@ Discord or texted). Its job is narrow and short-lived:
   isn't plaintext-readable if it ever leaks (e.g. sitting in Discord
   chat history).
 - Authenticates the session handshake (proves "the peer I'm connecting
-  to actually knows the code"), via a challenge/response (e.g. HMAC of
-  a random challenge value, keyed by the code) — **the code itself is
-  never transmitted on the wire, in any form**, so there's nothing for
-  an eavesdropper to directly capture and crack.
+  to actually knows the code," and that neither public key was
+  substituted in transit) via HMAC confirmation tags computed over the
+  two exchanged X25519 public keys (implemented in `auth.py`) —
+  **the code itself is never transmitted on the wire, in any form**,
+  so there's nothing for an eavesdropper to directly capture and crack.
 - Deliberately weak/guessable is an accepted tradeoff here, since the
   exposure window and blast radius are both small (see below) — this
   is what keeps the UX simple enough for "say a number out loud."
@@ -112,26 +113,37 @@ offsets, every message on the wire has a generic envelope:
 [ N bytes : payload ]
 ```
 
-Message types (current + planned):
-- `HELLO`          — sent first on every connection; challenge/response
-                     handshake proves both sides know the short pairing
-                     code, without transmitting the code itself
-- `HELLO_OK` / `HELLO_REJECT` — handshake result; reject closes the
-                     connection immediately (no retry on same connection)
+Message types (implemented, unless marked planned):
+- `HELLO`          — listener's X25519 public key (32 bytes), sent
+                     first on every connection
+- `HELLO_RESPONSE` — sender's X25519 public key + confirmation tag
+                     (HMAC-SHA256, keyed by the shared passphrase, over
+                     both public keys in a specific order) — proves
+                     passphrase knowledge AND binds the exchange to
+                     these exact keys, closing a man-in-the-middle gap
+                     a raw DH exchange alone wouldn't have
+- `HELLO_OK`       — listener's own confirmation tag (reversed key
+                     order, preventing a reflection attack), letting
+                     the sender verify the listener too
+- `HELLO_REJECT`   — handshake failed; connection closes right after
 - `FILE_OFFER`     — transfer_id, filesize, filename
 - `FILE_ACCEPT` / `FILE_REJECT` — receiver's per-file decision, shown
                      via CLI prompt for now, GUI dialog later
-- `FILE_CHUNK`     — chunk index + chunk hash + encrypted chunk bytes
+- `FILE_CHUNK`     — chunk index + SHA-256 hash of the PLAINTEXT chunk
+                     + the chunk data, ENCRYPTED (Fernet, keyed by the
+                     session key derived via HKDF from the DH shared
+                     secret)
 - `DONE`           — sender signals no more chunks; whole-file hash
-                     included, for a final end-to-end integrity check
+                     (of the plaintext) included, for a final
+                     end-to-end integrity check
 - `BYE`            — either side signals the session is closing
 - (planned) `CANCEL`, `RESEND_REQUEST` — additive later, once resume
   is built; the generic envelope means these don't require a protocol
   redesign
 
-Implemented so far: HELLO (defined, not yet wired up), FILE_OFFER,
-FILE_CHUNK, DONE. HELLO_OK/REJECT, FILE_ACCEPT/REJECT, and BYE are the
-next step (session loop + handshake).
+All of the above are implemented and tested, including the full
+authenticated key exchange (not just a placeholder challenge/response -
+see Security section above, which reflects the actual implementation).
 
 Using a generic envelope means adding new behavior later (cancel,
 pause, resume) is "add a new message type" rather than a protocol
@@ -191,6 +203,35 @@ redesign.
   persistent session model (see Transfer model above) is what makes
   this practical to add later without a redesign.
 
+## Robustness: logging and error handling (implemented)
+- All status output goes through a single `log()` function
+  (`logger.py`) rather than scattered `print()` calls. Functionally
+  identical today (prints with a timestamp), but this is a deliberate
+  seam for the GUI phase: a future "Details" panel can change what
+  `log()` does (append to a text widget) without touching any of the
+  calling code elsewhere.
+- The listener's main accept loop wraps each session in a broad
+  try/except (`ConnectionError`, `OSError`, and a final catch-all).
+  This is intentional and important: a single bad/dropped connection
+  must never be able to crash the whole listener, since that would
+  defeat the "always listening" design goal - especially once a GUI is
+  relying on this loop running unattended in a background thread.
+  Verified experimentally: an abrupt mid-handshake disconnect is
+  caught and logged, and the very next connection attempt is still
+  handled correctly.
+- The sender wraps its initial `connect()` call specifically, since
+  "peer's app isn't running" / "port not forwarded" / "wrong IP" are
+  common, expected failure modes that deserve a clear message rather
+  than a raw traceback.
+- **Platform lesson learned:** on Windows, a file cannot be renamed or
+  moved while any process still holds it open (`WinError 32`) - unlike
+  Linux/Mac, which generally allow this. `receive_file()` in
+  `listener.py` explicitly closes the output file handle before
+  calling `finalize_transfer()` (which renames the file into its final
+  location), rather than relying on a `finally` block that would only
+  run after the rename was already attempted. Worth remembering for
+  any future code that renames/moves files that were just written to.
+
 ## Contacts
 - Saved locally in a JSON file next to the app.
 - Each contact stores: name, ip, port, passphrase (since passphrases
@@ -212,18 +253,27 @@ redesign.
    send/receive, per-chunk hashing, whole-file verification via DONE
 2. ✅ Staged storage: transfer IDs, pre-allocation, manifests,
    collision-safe finalization — groundwork for future resume
-3. **Next:** persistent session connection + handshake — HELLO
-   challenge/response, FILE_ACCEPT/REJECT loop, BYE (still CLI; a
-   hardcoded shared code stands in for the real pairing-code flow
-   until the GUI exists)
-4. Real encryption — Diffie-Hellman (X25519) session key exchange,
-   authenticated by the short pairing code; encrypt chunks with the
-   resulting session key (Fernet or direct AEAD)
-5. GUI shell wrapping the working CLI/session logic
-6. Contacts persistence, clipboard, encrypted connection-string
+3. ✅ Persistent session connection + handshake: FILE_ACCEPT/REJECT
+   loop, BYE, listener loops to accept multiple sessions over time
+4. ✅ Real encryption: authenticated X25519 Diffie-Hellman key
+   exchange (HMAC confirmation tags derived from a shared passphrase,
+   closing the MITM gap), HKDF session key derivation, Fernet chunk
+   encryption. Verified: matching shared secrets, tampering detection,
+   wrong-key decryption failure, corrupted-ciphertext detection.
+5. ✅ Robustness: centralized logging (seam for future GUI details
+   view), broad error handling so no single connection can crash the
+   listener, clear messages for common connect() failures
+6. **Next:** GUI shell wrapping the working CLI/session logic —
+   including a "Details" view surfacing the same log() output visible
+   in the terminal today
+7. Contacts persistence, clipboard, encrypted connection-string
    generation/parsing, live transfer stats (rate, ETA)
-7. (Future) Real resume: reconnect + manifest-based "here's what's
+8. (Future) Real resume: reconnect + manifest-based "here's what's
    missing" exchange, using groundwork already in place
-8. (Future, exploratory) Browsing/requesting files from a peer's
+9. (Future, exploratory) Browsing/requesting files from a peer's
    shared folder — bigger feature, needs its own permission model,
    deliberately deferred
+
+Note: the shared passphrase (`auth.py`'s `SHARED_PASSPHRASE`) is still
+hardcoded, standing in for the real per-session pairing-code flow.
+Wiring that up is part of the GUI phase.
