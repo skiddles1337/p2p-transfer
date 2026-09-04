@@ -54,7 +54,8 @@ import itertools
 import os
 import math
 import hashlib
-from cryptography.fernet import Fernet, InvalidToken
+from chunk_crypto import ChunkCipher
+from cryptography.exceptions import InvalidTag
 
 from protocol import (
     recv_message,
@@ -122,7 +123,7 @@ class Session:
         self.sock = sock
         self.addr = addr
         self.direction = direction  # "inbound" or "outbound"
-        self.fernet = None
+        self.cipher = None
         self.send_lock = threading.Lock()
         # Set while THIS side has an offer out, awaiting the peer's answer.
         self.pending_outgoing_offer = None
@@ -186,7 +187,7 @@ class Engine:
         our_tag = compute_confirmation_tag(sender_public_bytes, listener_public_bytes)
         self._send(session, MSG_HELLO_OK, our_tag)
 
-        return Fernet(session_key)
+        return ChunkCipher(session_key)
 
     def _do_handshake_as_sender(self, session):
         sock = session.sock
@@ -208,7 +209,7 @@ class Engine:
 
         listener_public = public_key_from_bytes(listener_public_bytes)
         shared_secret = compute_shared_secret(sender_private, listener_public)
-        return Fernet(derive_session_key(shared_secret))
+        return ChunkCipher(derive_session_key(shared_secret))
 
     # ---------- session lifecycle ----------
 
@@ -219,22 +220,22 @@ class Engine:
 
         try:
             if as_listener:
-                fernet = self._do_handshake_as_listener(session)
+                cipher = self._do_handshake_as_listener(session)
             else:
-                fernet = self._do_handshake_as_sender(session)
+                cipher = self._do_handshake_as_sender(session)
         except (ConnectionError, OSError) as e:
             self._emit("handshake_result", session_id=session.session_id,
                        success=False, reason=str(e))
             self._cleanup_session(session, reason="handshake error")
             return
 
-        if fernet is None:
+        if cipher is None:
             self._emit("handshake_result", session_id=session.session_id,
                        success=False, reason="Authentication failed")
             self._cleanup_session(session, reason="handshake failed")
             return
 
-        session.fernet = fernet
+        session.cipher = cipher
         self._emit("handshake_result", session_id=session.session_id, success=True, reason=None)
 
         # One dedicated thread per session, draining send_queue one
@@ -331,9 +332,9 @@ class Engine:
                     chunk_index, expected_hash, encrypted_data = unpack_file_chunk(msg_payload)
 
                     try:
-                        chunk_data = session.fernet.decrypt(encrypted_data)
+                        chunk_data = session.cipher.decrypt(encrypted_data)
                         chunk_ok = hashlib.sha256(chunk_data).digest() == expected_hash
-                    except InvalidToken:
+                    except InvalidTag:
                         chunk_data = b""
                         chunk_ok = False
 
@@ -464,7 +465,7 @@ class Engine:
 
     def send_file(self, session_id, filepath):
         session = self.sessions.get(session_id)
-        if session is None or session.fernet is None:
+        if session is None or session.cipher is None:
             self._emit("log", message=f"Cannot send: session {session_id} not ready")
             return
 
@@ -511,7 +512,7 @@ class Engine:
 
                 whole_file_hasher.update(chunk)
                 chunk_hash = hashlib.sha256(chunk).digest()
-                encrypted_chunk = session.fernet.encrypt(chunk)
+                encrypted_chunk = session.cipher.encrypt(chunk)
 
                 chunk_payload = pack_file_chunk(chunk_index, chunk_hash, encrypted_chunk)
                 self._send(session, MSG_FILE_CHUNK, chunk_payload)

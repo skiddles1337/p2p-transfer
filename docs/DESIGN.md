@@ -65,8 +65,9 @@ PII). Instead:
   on the wire in any form, someone who recorded your traffic and later
   brute-forces your short code gains nothing — there's no captured key
   material to retroactively decrypt.
-- Each chunk is encrypted using this session key (`cryptography`'s
-  `Fernet`, or an AEAD cipher directly) before sending.
+- Each chunk is encrypted using this session key, via AES-256-GCM
+  directly (`chunk_crypto.py`) — see Wire protocol below for why raw
+  AES-GCM rather than a higher-level wrapper like Fernet.
 
 **Why not just make the pairing code itself strong?** It would work
 cryptographically, but breaks the desired UX — a code strong enough to
@@ -152,13 +153,42 @@ primitive (`threading.Event` + a place to store the answer). When a
 one, emits `file_offer_received`, and BLOCKS waiting on it -
 *only that session's own thread blocks*, so multiple pending offers
 from different peers can coexist without one blocking another. The
-same primitive is used in reverse for outgoing offers: the thread
-that called `send_file()` waits for the reader thread to receive and
-record a `FILE_ACCEPT`/`FILE_REJECT`.
+same primitive is used for outgoing offers: the session's dedicated
+SENDER thread (see below) waits for the reader thread to receive and
+record a `FILE_ACCEPT`/`FILE_REJECT`, before sending any chunk data.
 
-Verified via `tests/test_engine.py` (scripted, auto-accepting, not
-requiring a human) for both bidirectional sending and multiple
-simultaneous sessions.
+**Per-session send queue (bug found and fixed via CLI testing):**
+Each session has exactly ONE dedicated sender thread, draining a
+`send_queue` of files to send, one at a time, start to finish, before
+moving to the next. `send_file()` just enqueues a filepath - it does
+NOT spawn a new thread per call.
+
+This wasn't the original design - the first version spawned a new
+thread per `send_file()` call, each setting `session.pending_outgoing_
+offer` independently. Rapid-fire testing via `cli.py` (typing `send`
+several times before the first got a response - exactly the kind of
+unpredictable human timing `test_engine.py`'s scripted delays never
+exercised) exposed a real race: concurrent sender threads overwrote
+each other's `pending_outgoing_offer`, so an incoming `FILE_ACCEPT`
+could resolve the WRONG thread's wait, causing offers and chunk data
+to interleave out of order and crash the session. The fix - a single
+dedicated sender thread per session, processing a queue - eliminates
+the race by construction (only one outgoing offer can ever be in
+flight per session, not by convention, but because there's only one
+thread that could start another) while *improving* the UX: multiple
+quick `send_file()` calls now queue naturally instead of needing the
+caller to wait for each to finish.
+
+This is a good example of why testing with genuinely unpredictable
+timing (a human clicking at their own pace) matters even after
+thorough scripted/automated tests pass - some bugs only exist at
+exactly the boundary of "two things happening close together but not
+in the order the code implicitly assumed."
+
+Verified via `tests/test_engine.py` (scripted, auto-accepting) for
+bidirectional sending and multiple simultaneous sessions, and via
+manual `cli.py` testing (including deliberately reproducing the race
+above, both before and after the fix) for realistic human timing.
 
 ## Wire protocol — message-based framing
 Rather than hardcoding "filename, then size, then bytes" as fixed byte
@@ -192,14 +222,16 @@ Message types (implemented, unless marked planned):
                      today, a GUI popup later, with no engine changes
                      needed either way.
 - `FILE_CHUNK`     — chunk index + SHA-256 hash of the PLAINTEXT chunk
-                     + the chunk data, ENCRYPTED. Currently Fernet
-                     (base64-wrapped AES, ~33% size overhead per
-                     chunk); **planned near-term change** to raw
-                     AES-GCM (same `cryptography` library, same HKDF-
-                     derived key) to remove that overhead for large
-                     files - the engine's chunk pack/unpack is
-                     structured so this only touches the
-                     encrypt/decrypt calls, not the surrounding logic.
+                     + the chunk data, ENCRYPTED with AES-256-GCM
+                     directly (`chunk_crypto.py`), keyed by the HKDF-
+                     derived session key. Ciphertext is
+                     `[12-byte nonce][ciphertext+16-byte tag]` - only
+                     28 bytes of fixed overhead per chunk, regardless
+                     of chunk size (switched from Fernet, which
+                     base64-encoded its output and inflated every
+                     chunk by ~33%; verified via `chunk_crypto.py`'s
+                     self-test: 28 bytes overhead on a 1MB chunk vs.
+                     Fernet's ~349,624 bytes for the same size).
 - `DONE`           — sender signals no more chunks; whole-file hash
                      (of the plaintext) included, for a final
                      end-to-end integrity check
@@ -330,7 +362,7 @@ redesign.
    loop, BYE, listener loops to accept multiple sessions over time
 4. ✅ Real encryption: authenticated X25519 Diffie-Hellman key
    exchange (HMAC confirmation tags derived from a shared passphrase,
-   closing the MITM gap), HKDF session key derivation, Fernet chunk
+   closing the MITM gap), HKDF session key derivation, chunk
    encryption. Verified: matching shared secrets, tampering detection,
    wrong-key decryption failure, corrupted-ciphertext detection.
 5. ✅ Robustness: centralized logging, broad error handling, filename
@@ -340,21 +372,39 @@ redesign.
    run) with `engine.py` — a presentation-agnostic core supporting
    true bidirectional sending and multiple simultaneous sessions on
    one port. See Architecture section above. Verified via
-   `tests/test_engine.py`.
-7. **Next:** switch chunk encryption from Fernet to raw AES-GCM
-   (removes ~33% base64 overhead per chunk - see Wire protocol above)
-8. **Then:** GUI — planned as a local web UI (HTML/CSS/JS frontend,
+   `tests/test_engine.py`, and via real human-timing testing with
+   `cli.py` (which caught and led to fixing the send-queue race
+   described above).
+7. ✅ **`cli.py`**: a permanent, lightweight interactive CLI on top of
+   `engine.py` - not a throwaway test harness. Intended to remain a
+   real, first-class way to use the app going forward (useful on
+   low-spec machines, and a natural base for a future automation-
+   oriented CLI mode), not just a stepping stone to the GUI.
+8. ✅ Switched chunk encryption from Fernet to raw AES-256-GCM
+   (`chunk_crypto.py`) - removes ~33% base64 overhead per chunk,
+   replaced with a fixed 28 bytes (12-byte nonce + 16-byte auth tag)
+   regardless of chunk size. Same security properties (authenticated
+   encryption, tampering still detected via `InvalidTag`). Verified:
+   round-trip correctness, tampering detection, and a real 3MB
+   multi-chunk transfer end-to-end after the swap.
+9. **Then:** GUI — planned as a local web UI (HTML/CSS/JS frontend,
    rendered via `pywebview` for a native-feeling window) rather than a
    native Python toolkit, specifically to support modern, animated
    visuals (e.g. a chunk-by-chunk progress grid) - browser engines
    GPU-accelerate this kind of rendering by default. The engine's
    event queue maps naturally onto this: push events to the frontend
    over a local websocket as they occur, rather than polling.
-9. Contacts persistence, clipboard, encrypted connection-string
-   generation/parsing, live transfer stats (rate, ETA)
-10. (Future) Real resume: reconnect + manifest-based "here's what's
+10. Contacts persistence, clipboard, encrypted connection-string
+    generation/parsing, live transfer stats (rate, ETA)
+11. (Future) Real resume: reconnect + manifest-based "here's what's
     missing" exchange, using groundwork already in place
-11. (Future, exploratory) Browsing/requesting files from a peer's
+12. (Future) A more automation-oriented CLI mode (JSON event output,
+    one-shot subcommands with proper exit codes, non-interactive
+    accept policies) - deliberately deferred until a real automation
+    use case exists, rather than speculatively designed now. `cli.py`
+    already proves the engine's command/event interface supports this
+    without changes to `engine.py` itself.
+13. (Future, exploratory) Browsing/requesting files from a peer's
     shared folder — bigger feature, needs its own permission model,
     deliberately deferred
 
@@ -362,9 +412,9 @@ Note: the shared passphrase (`auth.py`'s `SHARED_PASSPHRASE`) is still
 hardcoded, standing in for the real per-session pairing-code flow.
 Wiring that up is part of the GUI phase.
 
-`listener.py` and `sender.py` (the original CLI scripts) are
-superseded by `engine.py` and are being retired - `engine.py` covers
-everything they did plus bidirectional sending and multi-session
-support. `tests/simulate_corruption.py` still references the older
-single-direction flow and will need a small update to use `engine.py`
-if kept going forward.
+`listener.py` and `sender.py` (the original single-direction CLI
+scripts) have been removed - fully superseded by `engine.py` +
+`cli.py`. `tests/simulate_corruption.py` still references the older
+pre-engine flow; either update it to use `engine.py` or retire it in
+favor of `tests/test_engine.py`, which already covers similar ground
+(including corruption/failure paths) against the current architecture.

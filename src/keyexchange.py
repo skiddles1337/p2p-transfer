@@ -20,7 +20,6 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import (
 )
 from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-import base64
 
 
 def generate_keypair():
@@ -83,8 +82,10 @@ def derive_session_key(shared_secret: bytes) -> bytes:
     the standard, expected step between "I have a shared secret" and
     "I have an encryption key" in any real protocol using DH exchange.
 
-    Returns bytes already formatted as a valid Fernet key (Fernet
-    requires a 32-byte key, base64-encoded in its "urlsafe" variant).
+    Returns a raw 32-byte key, suitable for AES-256-GCM (see
+    chunk_crypto.py) - unlike an earlier version of this function,
+    this is NOT base64-encoded, since that was only needed for
+    Fernet's specific key format and we no longer use Fernet.
     """
     hkdf = HKDF(
         algorithm=hashes.SHA256(),
@@ -92,8 +93,7 @@ def derive_session_key(shared_secret: bytes) -> bytes:
         salt=None,
         info=b"p2p-transfer session key",
     )
-    raw_key = hkdf.derive(shared_secret)
-    return base64.urlsafe_b64encode(raw_key)
+    return hkdf.derive(shared_secret)
 
 
 if __name__ == "__main__":
