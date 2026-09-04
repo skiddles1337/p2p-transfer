@@ -90,8 +90,19 @@ same as basically all end-to-end encrypted tools.
   straightforward. Avoids needing a second socket/port.
 - A session covers: connect → handshake (HELLO) → loop of file offers
   (each accepted/rejected, then transferred if accepted) → BYE to
-  close. Either side can initiate a file offer once the session is
-  authenticated - not just the original connector.
+  close.
+- **Bidirectional sending is fully implemented (not just planned):**
+  once a session is authenticated, EITHER side can call `send_file()`
+  at any time — not just the side that initiated the connection.
+  Verified experimentally: peer B connects to peer A, B sends A a
+  file, then A sends B a file back on that same still-open connection,
+  with no reconnection needed.
+- **Multiple simultaneous sessions are fully implemented:** a single
+  listener can handle several different peers connected at the same
+  time, each independently. Still only ONE port is ever needed - each
+  accepted connection gets its own socket and its own thread; the
+  listening port itself is never "used up" by a connection (see
+  Architecture below for how).
 - Rejecting one file does NOT close the session — the loop continues,
   ready for the next offer. Only an explicit BYE (or connection
   failure) ends it. (In the GUI, this is the "big X to close the
@@ -102,6 +113,52 @@ same as basically all end-to-end encrypted tools.
   particular connection's lifetime. A dropped connection mid-session
   can reconnect and resume based on this state (resume logic itself is
   still a future phase — the groundwork is in place now).
+
+## Architecture: engine / presentation separation (implemented)
+`engine.py` is the core of the application, deliberately built with NO
+knowledge of how it's presented to a person - not CLI, not GUI,
+nothing UI-specific at all. It exposes:
+- **Commands** (plain method calls): `start_listening`,
+  `stop_listening`, `connect_to_peer`, `send_file`,
+  `respond_to_offer`, `close_session`
+- **Events** (a thread-safe `queue.Queue`): `session_started`,
+  `handshake_result`, `file_offer_received`, `file_offer_answered`,
+  `chunk_progress`, `file_complete`, `session_closed`, `log`
+
+Whatever eventually presents this (a terminal loop, a GUI, a web
+frontend) just calls commands and reacts to events pulled off the
+queue - it never touches a socket, a thread, or the wire protocol
+directly. This separation means the actual UI can be built, or even
+swapped out later, without ever touching the networking/crypto code
+again.
+
+**Threading model, per session:**
+- Each session (one connection to one peer) gets exactly ONE dedicated
+  "reader" thread, whose only job is to loop on `recv_message()` and
+  react to whatever arrives.
+- Sending happens from WHATEVER thread calls `send_file()` or responds
+  to an offer - never from the reader thread. This split is what makes
+  bidirectional sending possible: nothing is ever stuck only-listening.
+- A per-session `send_lock` (a `threading.Lock`) guards every write to
+  that session's socket, since two threads could otherwise interleave
+  writes and corrupt the byte stream.
+- The listener's accept loop spawns one new thread per accepted
+  connection and immediately goes back to `accept()`-ing more - this
+  is what makes multiple simultaneous sessions possible on one port.
+
+**The offer hand-off (`PendingDecision`):** a small wait/signal
+primitive (`threading.Event` + a place to store the answer). When a
+`FILE_OFFER` arrives, the receiving session's reader thread creates
+one, emits `file_offer_received`, and BLOCKS waiting on it -
+*only that session's own thread blocks*, so multiple pending offers
+from different peers can coexist without one blocking another. The
+same primitive is used in reverse for outgoing offers: the thread
+that called `send_file()` waits for the reader thread to receive and
+record a `FILE_ACCEPT`/`FILE_REJECT`.
+
+Verified via `tests/test_engine.py` (scripted, auto-accepting, not
+requiring a human) for both bidirectional sending and multiple
+simultaneous sessions.
 
 ## Wire protocol — message-based framing
 Rather than hardcoding "filename, then size, then bytes" as fixed byte
@@ -127,12 +184,22 @@ Message types (implemented, unless marked planned):
                      the sender verify the listener too
 - `HELLO_REJECT`   — handshake failed; connection closes right after
 - `FILE_OFFER`     — transfer_id, filesize, filename
-- `FILE_ACCEPT` / `FILE_REJECT` — receiver's per-file decision, shown
-                     via CLI prompt for now, GUI dialog later
+- `FILE_ACCEPT` / `FILE_REJECT` — receiver's per-file decision. The
+                     engine surfaces the decision request as a
+                     `file_offer_received` event and blocks that
+                     session's thread on a `PendingDecision` until
+                     `respond_to_offer()` is called - by a CLI prompt
+                     today, a GUI popup later, with no engine changes
+                     needed either way.
 - `FILE_CHUNK`     — chunk index + SHA-256 hash of the PLAINTEXT chunk
-                     + the chunk data, ENCRYPTED (Fernet, keyed by the
-                     session key derived via HKDF from the DH shared
-                     secret)
+                     + the chunk data, ENCRYPTED. Currently Fernet
+                     (base64-wrapped AES, ~33% size overhead per
+                     chunk); **planned near-term change** to raw
+                     AES-GCM (same `cryptography` library, same HKDF-
+                     derived key) to remove that overhead for large
+                     files - the engine's chunk pack/unpack is
+                     structured so this only touches the
+                     encrypt/decrypt calls, not the surrounding logic.
 - `DONE`           — sender signals no more chunks; whole-file hash
                      (of the plaintext) included, for a final
                      end-to-end integrity check
@@ -203,34 +270,40 @@ redesign.
   persistent session model (see Transfer model above) is what makes
   this practical to add later without a redesign.
 
-## Robustness: logging and error handling (implemented)
+## Robustness: logging, error handling, and filename safety (implemented)
 - All status output goes through a single `log()` function
-  (`logger.py`) rather than scattered `print()` calls. Functionally
-  identical today (prints with a timestamp), but this is a deliberate
-  seam for the GUI phase: a future "Details" panel can change what
-  `log()` does (append to a text widget) without touching any of the
-  calling code elsewhere.
-- The listener's main accept loop wraps each session in a broad
-  try/except (`ConnectionError`, `OSError`, and a final catch-all).
-  This is intentional and important: a single bad/dropped connection
-  must never be able to crash the whole listener, since that would
-  defeat the "always listening" design goal - especially once a GUI is
-  relying on this loop running unattended in a background thread.
+  (`logger.py`) rather than scattered `print()` calls, AND through the
+  engine's `event_queue` ("log" events) — a deliberate seam for the
+  GUI phase: a future "Details" panel can consume these events without
+  touching any calling code elsewhere.
+- Each session's thread (`engine.py`'s `_run_session`) wraps its
+  handshake and reader loop in broad try/except (`ConnectionError`,
+  `OSError`, and a final catch-all). This is intentional and
+  important: a single bad/dropped connection must never be able to
+  crash the whole listener or any OTHER session's thread - especially
+  once a GUI is relying on this running unattended in the background.
   Verified experimentally: an abrupt mid-handshake disconnect is
-  caught and logged, and the very next connection attempt is still
-  handled correctly.
-- The sender wraps its initial `connect()` call specifically, since
+  caught and logged, and the listener keeps accepting new connections
+  normally afterward.
+- `connect_to_peer()` wraps its `connect()` call specifically, since
   "peer's app isn't running" / "port not forwarded" / "wrong IP" are
   common, expected failure modes that deserve a clear message rather
   than a raw traceback.
+- **Filename sanitization** (`storage.py`'s `sanitize_filename`):
+  beyond stripping path-traversal attempts (`os.path.basename`), also
+  replaces characters Windows forbids entirely in filenames
+  (`: * ? " < > |` and control characters) and strips trailing dots/
+  spaces (also Windows-illegal). Prevents a peer sending an unusual or
+  malformed filename from causing a confusing `OSError` when creating
+  the file, rather than rejecting the transfer outright.
 - **Platform lesson learned:** on Windows, a file cannot be renamed or
   moved while any process still holds it open (`WinError 32`) - unlike
-  Linux/Mac, which generally allow this. `receive_file()` in
-  `listener.py` explicitly closes the output file handle before
-  calling `finalize_transfer()` (which renames the file into its final
-  location), rather than relying on a `finally` block that would only
-  run after the rename was already attempted. Worth remembering for
-  any future code that renames/moves files that were just written to.
+  Linux/Mac, which generally allow this. `_receive_file()` explicitly
+  closes the output file handle before calling `finalize_transfer()`
+  (which renames the file into its final location), rather than
+  relying on a `finally` block that would only run too late. Worth
+  remembering for any future code that renames/moves files that were
+  just written to.
 
 ## Contacts
 - Saved locally in a JSON file next to the app.
@@ -260,20 +333,38 @@ redesign.
    closing the MITM gap), HKDF session key derivation, Fernet chunk
    encryption. Verified: matching shared secrets, tampering detection,
    wrong-key decryption failure, corrupted-ciphertext detection.
-5. ✅ Robustness: centralized logging (seam for future GUI details
-   view), broad error handling so no single connection can crash the
-   listener, clear messages for common connect() failures
-6. **Next:** GUI shell wrapping the working CLI/session logic —
-   including a "Details" view surfacing the same log() output visible
-   in the terminal today
-7. Contacts persistence, clipboard, encrypted connection-string
+5. ✅ Robustness: centralized logging, broad error handling, filename
+   sanitization
+6. ✅ **Engine rework**: replaced the original `listener.py`/`sender.py`
+   scripts (which assumed one fixed sender and one fixed receiver per
+   run) with `engine.py` — a presentation-agnostic core supporting
+   true bidirectional sending and multiple simultaneous sessions on
+   one port. See Architecture section above. Verified via
+   `tests/test_engine.py`.
+7. **Next:** switch chunk encryption from Fernet to raw AES-GCM
+   (removes ~33% base64 overhead per chunk - see Wire protocol above)
+8. **Then:** GUI — planned as a local web UI (HTML/CSS/JS frontend,
+   rendered via `pywebview` for a native-feeling window) rather than a
+   native Python toolkit, specifically to support modern, animated
+   visuals (e.g. a chunk-by-chunk progress grid) - browser engines
+   GPU-accelerate this kind of rendering by default. The engine's
+   event queue maps naturally onto this: push events to the frontend
+   over a local websocket as they occur, rather than polling.
+9. Contacts persistence, clipboard, encrypted connection-string
    generation/parsing, live transfer stats (rate, ETA)
-8. (Future) Real resume: reconnect + manifest-based "here's what's
-   missing" exchange, using groundwork already in place
-9. (Future, exploratory) Browsing/requesting files from a peer's
-   shared folder — bigger feature, needs its own permission model,
-   deliberately deferred
+10. (Future) Real resume: reconnect + manifest-based "here's what's
+    missing" exchange, using groundwork already in place
+11. (Future, exploratory) Browsing/requesting files from a peer's
+    shared folder — bigger feature, needs its own permission model,
+    deliberately deferred
 
 Note: the shared passphrase (`auth.py`'s `SHARED_PASSPHRASE`) is still
 hardcoded, standing in for the real per-session pairing-code flow.
 Wiring that up is part of the GUI phase.
+
+`listener.py` and `sender.py` (the original CLI scripts) are
+superseded by `engine.py` and are being retired - `engine.py` covers
+everything they did plus bidirectional sending and multi-session
+support. `tests/simulate_corruption.py` still references the older
+single-direction flow and will need a small update to use `engine.py`
+if kept going forward.

@@ -113,8 +113,9 @@ class PendingDecision:
 class Session:
     """
     State for one connection to one peer. Each Session has its own
-    reader thread (started elsewhere) and its own send_lock guarding
-    writes to its socket.
+    reader thread and its own dedicated SENDER thread (draining
+    send_queue one file at a time), plus its own send_lock guarding
+    raw socket writes.
     """
     def __init__(self, session_id, sock, addr, direction):
         self.session_id = session_id
@@ -125,6 +126,13 @@ class Session:
         self.send_lock = threading.Lock()
         # Set while THIS side has an offer out, awaiting the peer's answer.
         self.pending_outgoing_offer = None
+        # Files queued to send on this session - a DEDICATED sender
+        # thread (started once the handshake succeeds) drains this
+        # one at a time. This is what prevents multiple send_file()
+        # calls from racing each other over pending_outgoing_offer -
+        # only ever ONE outgoing offer is in flight per session at a
+        # time, by construction, not by hoping callers behave.
+        self.send_queue = queue.Queue()
 
 
 class Engine:
@@ -229,6 +237,13 @@ class Engine:
         session.fernet = fernet
         self._emit("handshake_result", session_id=session.session_id, success=True, reason=None)
 
+        # One dedicated thread per session, draining send_queue one
+        # file at a time - this is what guarantees only one outgoing
+        # offer is ever in flight on this session at once.
+        threading.Thread(
+            target=self._sender_loop, args=(session,), daemon=True
+        ).start()
+
         try:
             self._reader_loop(session)
         except (ConnectionError, OSError) as e:
@@ -243,6 +258,7 @@ class Engine:
             session.sock.close()
         except OSError:
             pass
+        session.send_queue.put(None)  # sentinel: stop this session's sender thread
         self.sessions.pop(session.session_id, None)
         self._emit("session_closed", session_id=session.session_id, reason=reason)
 
@@ -429,17 +445,37 @@ class Engine:
         threading.Thread(target=worker, daemon=True).start()
         return session_id
 
+    def _sender_loop(self, session):
+        """
+        Runs for the lifetime of the session: pulls filepaths off
+        send_queue one at a time and sends each fully (offer, wait for
+        accept/reject, chunks if accepted) before moving to the next.
+        A None sentinel signals this loop to stop (used on cleanup).
+        """
+        while True:
+            filepath = session.send_queue.get()
+            if filepath is None:
+                return
+            try:
+                self._send_one_file(session, filepath)
+            except (ConnectionError, OSError) as e:
+                self._emit("log", message=f"Send failed on session {session.session_id}: {e}")
+                return
+
     def send_file(self, session_id, filepath):
         session = self.sessions.get(session_id)
         if session is None or session.fernet is None:
             self._emit("log", message=f"Cannot send: session {session_id} not ready")
             return
 
-        threading.Thread(
-            target=self._send_file_worker, args=(session, filepath), daemon=True
-        ).start()
+        # Just enqueue - the session's dedicated sender thread (started
+        # once, when the session's handshake succeeded) will process
+        # this in order, one file at a time. Calling send_file()
+        # several times quickly is safe and simply queues them up,
+        # rather than racing multiple sends against each other.
+        session.send_queue.put(filepath)
 
-    def _send_file_worker(self, session, filepath):
+    def _send_one_file(self, session, filepath):
         filename = sanitize_filename(os.path.basename(filepath))
         filesize = os.path.getsize(filepath)
         transfer_id = os.urandom(TRANSFER_ID_LEN)
