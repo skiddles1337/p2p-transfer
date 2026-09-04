@@ -158,6 +158,17 @@ def receive_file(conn, filename: str, filesize: int, transfer_id: bytes, fernet:
                 log(f"Received DONE. {chunks_received} chunks processed, "
                     f"{len(failed_chunk_indices)} failed.")
 
+                # IMPORTANT: close the file handle before any attempt
+                # to rename/move it. On Linux/Mac, renaming a file
+                # that's still open generally works fine - but Windows
+                # refuses ("file in use by another process") until
+                # every handle to it is closed. Since finalize_transfer
+                # renames the file, we must close it first, explicitly,
+                # rather than waiting for the `finally` block below
+                # (which only runs once this whole function returns -
+                # too late for finalize_transfer's rename to succeed).
+                output_file.close()
+
                 if failed_chunk_indices:
                     log(f"Chunks needing resend: {failed_chunk_indices}")
                     log(f"File left in staging (not finalized): {data_path}")
