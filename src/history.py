@@ -11,9 +11,9 @@ directly, keeping it decoupled and independently testable.
 """
 
 import os
-import json
 import time
 import platformdirs
+import json_store
 
 APP_NAME = "p2p-transfer"
 HISTORY_PATH = os.path.join(platformdirs.user_data_dir(APP_NAME, appauthor=False), "history.json")
@@ -26,14 +26,11 @@ MAX_ENTRIES = 500
 
 def load_history() -> list[dict]:
     """
-    Return all recorded transfers, most recent first. Returns an
-    empty list if no history file exists yet (first run) - a normal
-    state, not an error.
+    Return all recorded transfers, most recent first. Returns an empty
+    list if no history file exists yet (first run), or if the file is
+    somehow corrupted - see json_store.safe_load_json.
     """
-    if not os.path.exists(HISTORY_PATH):
-        return []
-    with open(HISTORY_PATH, "r") as f:
-        return json.load(f)
+    return json_store.safe_load_json(HISTORY_PATH, default=[])
 
 
 def record_transfer(direction: str, peer_name: str, filename: str,
@@ -64,10 +61,7 @@ def record_transfer(direction: str, peer_name: str, filename: str,
     entries.insert(0, entry)
     entries = entries[:MAX_ENTRIES]  # trim oldest if over the cap
 
-    parent_dir = os.path.dirname(HISTORY_PATH)
-    os.makedirs(parent_dir, exist_ok=True)
-    with open(HISTORY_PATH, "w") as f:
-        json.dump(entries, f, indent=2)
+    json_store.atomic_write_json(HISTORY_PATH, entries)
 
 
 def clear_history() -> None:

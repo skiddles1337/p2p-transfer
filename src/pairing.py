@@ -100,6 +100,27 @@ def load_contacts_into_engine(engine) -> int:
     return len(all_contacts)
 
 
+def forget_contact(engine, name: str) -> bool:
+    """
+    Remove a saved contact AND make the RUNNING engine forget their
+    passphrase immediately - fixes a real gap (Gap C): removing a
+    contact via contacts.remove_contact() alone only touches the saved
+    file. If the app is already running when that happens, the
+    engine's known_passphrases would still hold the old entry and
+    would keep accepting a connection from someone just "removed,"
+    until the app happens to restart - the opposite problem from Gap
+    B, but the same underlying lesson: contacts.json and
+    engine.known_passphrases are two separate pieces of state that
+    must be kept in sync deliberately, not left to happen on their own.
+
+    Returns True if the contact existed and was removed, False
+    otherwise (mirroring contacts.remove_contact's own return value).
+    """
+    removed = contacts_module.remove_contact(name)
+    engine.remove_known_passphrase(name)
+    return removed
+
+
 if __name__ == "__main__":
     # End-to-end simulation of the full realistic workflow, including
     # the "app restart" scenario that Gap B was hiding.

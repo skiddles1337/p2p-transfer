@@ -13,8 +13,8 @@ directory rather than alongside downloads.
 """
 
 import os
-import json
 import platformdirs
+import json_store
 
 APP_NAME = "p2p-transfer"
 CONTACTS_PATH = os.path.join(platformdirs.user_config_dir(APP_NAME, appauthor=False), "contacts.json")
@@ -24,25 +24,20 @@ def load_contacts() -> dict:
     """
     Return all saved contacts as {name: {"ip": ..., "port": ...,
     "passphrase": ...}}. Returns an empty dict if no contacts file
-    exists yet (first run) - this is a normal state, not an error.
+    exists yet (first run), or if the file is somehow corrupted -
+    see json_store.safe_load_json for how that's handled.
     """
-    if not os.path.exists(CONTACTS_PATH):
-        return {}
-
-    with open(CONTACTS_PATH, "r") as f:
-        return json.load(f)
+    return json_store.safe_load_json(CONTACTS_PATH, default={})
 
 
 def save_contacts(contacts: dict) -> None:
     """
-    Overwrite the contacts file with the given full set. Callers
-    typically load, modify the dict, then save - see add_contact/
-    remove_contact below for the common single-contact case.
+    Overwrite the contacts file with the given full set, atomically -
+    see json_store.atomic_write_json. Callers typically load, modify
+    the dict, then save - see add_contact/remove_contact below for the
+    common single-contact case.
     """
-    parent_dir = os.path.dirname(CONTACTS_PATH)
-    os.makedirs(parent_dir, exist_ok=True)
-    with open(CONTACTS_PATH, "w") as f:
-        json.dump(contacts, f, indent=2)
+    json_store.atomic_write_json(CONTACTS_PATH, contacts)
 
 
 def add_contact(name: str, ip: str, port: int, passphrase: str) -> None:

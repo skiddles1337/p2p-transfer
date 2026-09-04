@@ -711,6 +711,58 @@ state:**
   pattern (save on blur/pause, a momentary checkmark/flash), same as
   any other persistent preference field.
 
+## Small, cheap fixes found by deliberately re-scanning the whole
+## system for gaps (implemented, all tested)
+
+1. **Crash-safe JSON persistence (`json_store.py`, new).** Every JSON
+   file we write (`contacts.json`, `history.json`, the save-dir
+   override, manifests) previously wrote directly to the real file - a
+   crash or power loss mid-write leaves a TRUNCATED, invalid file
+   behind, and a naive `json.load()` on next startup would raise an
+   exception that could take down the whole app, not just lose one
+   piece of data. Fixed with two shared helpers used everywhere JSON
+   is persisted: `atomic_write_json()` (write to a temp file, then
+   `os.replace()` over the real one - the same trick already used for
+   finalizing transfers) and `safe_load_json()` (falls back to a
+   sensible default rather than crashing if a file is corrupted,
+   preserving the broken file under a `.corrupted` suffix rather than
+   silently losing it). Verified: normal round-trip, missing file,
+   and a genuinely corrupted `contacts.json` (simulated mid-write
+   crash) - all handled correctly, app keeps working afterward.
+   `write_manifest()` also switched to this (was still using a
+   non-atomic write internally - and a bug introduced while removing
+   the old `json` import, caught immediately by rerunning the full
+   test suite, is a good reminder to always check full test output
+   rather than grepping for an expected success line).
+
+2. **`pairing.forget_contact()` - the removal-side counterpart to the
+   earlier wiring fixes.** Removing a contact via
+   `contacts.remove_contact()` alone only touched the saved file - if
+   the app was already running, `engine.known_passphrases` still held
+   the old entry, so a "removed" contact could keep successfully
+   connecting until the app happened to restart. Same category of bug
+   as the two pairing gaps found earlier (data and engine state
+   drifting out of sync). Verified with a REAL live connection: after
+   `forget_contact()`, a connection attempt using the old passphrase
+   correctly reaches the listener (proving it's not just refused at
+   the network level) and then correctly fails handshake
+   authentication.
+
+3. **Filename length cap (`storage.py`'s `MAX_FILENAME_LENGTH`).** An
+   unusually long filename from a peer could push the STAGED file's
+   name (original name + `.` + 32-char transfer_id + `.part`) past
+   typical filesystem limits (255 chars), surfacing as a confusing
+   `OSError` deep inside `preallocate_file` rather than a clear
+   failure at sanitization time. `sanitize_filename()` now truncates
+   to 200 characters, preserving the extension. Verified with a
+   500-character filename.
+
+4. **Zero-byte file transfer - verified, not just reasoned about.**
+   Traced through the logic (0 chunks needed, `DONE` carries the hash
+   of empty bytes) and then actually ran it end-to-end: an empty file
+   sends correctly (zero `FILE_CHUNK` messages, straight to `DONE`)
+   and lands correctly as a genuine 0-byte file at the destination.
+
 ## GUI next steps (not yet designed)
 Layout, the concrete event→frontend wiring mechanism (websocket vs.
 pywebview's JS bridge), and the connection-string UI flow itself still

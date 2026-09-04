@@ -49,17 +49,13 @@ OS-appropriate Downloads location instead:
 """
 
 import os
-import json
 import platformdirs
+import json_store
 
 APP_NAME = "p2p-transfer"
 
 DEFAULT_SAVE_DIR = os.path.join(platformdirs.user_downloads_dir(), "P2P Transfer")
 
-# Where we persist a save-dir override, if the person has set one via
-# a Settings screen. Separate tiny file rather than folding into
-# contacts.json/history.json, since this is a distinct concern (app
-# configuration, not saved relationships or activity records).
 _SAVE_DIR_CONFIG_PATH = os.path.join(
     platformdirs.user_config_dir(APP_NAME, appauthor=False), "storage_settings.json"
 )
@@ -67,10 +63,7 @@ _SAVE_DIR_CONFIG_PATH = os.path.join(
 
 def _load_save_dir_override():
     """Return the overridden save dir, or None if using the default."""
-    if not os.path.exists(_SAVE_DIR_CONFIG_PATH):
-        return None
-    with open(_SAVE_DIR_CONFIG_PATH, "r") as f:
-        data = json.load(f)
+    data = json_store.safe_load_json(_SAVE_DIR_CONFIG_PATH, default={})
     return data.get("save_dir_override")
 
 
@@ -97,11 +90,7 @@ def set_save_dir(path: str) -> None:
     catch this and show it, not let it propagate as a crash.
     """
     os.makedirs(path, exist_ok=True)  # raises OSError if not usable
-
-    parent_dir = os.path.dirname(_SAVE_DIR_CONFIG_PATH)
-    os.makedirs(parent_dir, exist_ok=True)
-    with open(_SAVE_DIR_CONFIG_PATH, "w") as f:
-        json.dump({"save_dir_override": path}, f, indent=2)
+    json_store.atomic_write_json(_SAVE_DIR_CONFIG_PATH, {"save_dir_override": path})
 
 
 def reset_save_dir() -> None:
@@ -124,6 +113,16 @@ def get_staging_dir() -> str:
 # lands with a slightly modified name.
 _ILLEGAL_FILENAME_CHARS = '<>:"/\\|?*'
 
+# Most filesystems cap an individual filename component at 255
+# characters/bytes (NTFS, ext4, etc.). We stay comfortably under that,
+# leaving headroom for the ".<32-char transfer_id>.part" suffix
+# staging_paths() adds on top of this (~38 extra characters) - without
+# a cap, a peer sending an unusually long filename could push the
+# STAGED file's name over the real OS limit, surfacing as a confusing
+# OSError deep inside preallocate_file rather than a clear failure
+# here, at the point where we actually know what's going wrong.
+MAX_FILENAME_LENGTH = 200
+
 
 def sanitize_filename(filename: str) -> str:
     """
@@ -132,12 +131,13 @@ def sanitize_filename(filename: str) -> str:
 
     Beyond the path-traversal stripping we already did (basename), a
     filename could still contain characters Windows forbids entirely
-    in file names (: * ? " < > | and friends), or forbidden trailing
+    in file names (: * ? " < > | and friends), forbidden trailing
     characters (Windows disallows a filename ending in a space or a
-    dot). None of this is exploitable in a dangerous way, but left
-    unhandled it would surface as a confusing OSError when we tried to
-    create the file - bad experience for something that's about to be
-    GUI-facing and receiving files from a less controlled source.
+    dot), or simply be too long for the filesystem to accept. None of
+    this is exploitable in a dangerous way, but left unhandled it
+    would surface as a confusing OSError when we tried to create the
+    file - bad experience for something that's about to be GUI-facing
+    and receiving files from a less controlled source.
     """
     name = os.path.basename(filename)
 
@@ -157,6 +157,13 @@ def sanitize_filename(filename: str) -> str:
     # rather than trying to create a file with an empty name.
     if not cleaned:
         cleaned = "unnamed_file"
+
+    # Truncate overly long names, preserving the extension so the
+    # file type isn't lost - only the base name gets shortened.
+    if len(cleaned) > MAX_FILENAME_LENGTH:
+        base, ext = os.path.splitext(cleaned)
+        keep = max(MAX_FILENAME_LENGTH - len(ext), 1)
+        cleaned = base[:keep] + ext
 
     return cleaned
 
@@ -208,7 +215,11 @@ def write_manifest(manifest_path: str, filename: str, filesize: int,
     Write (or overwrite) the manifest describing a staged transfer's
     current state. Called after processing each chunk, so the on-disk
     record stays up to date even if the process were to crash or the
-    connection were to drop mid-transfer.
+    connection were to drop mid-transfer - written atomically (see
+    json_store) for the same reason: a crash mid-write here shouldn't
+    leave behind a corrupted manifest that a future resume feature (or
+    a curious person opening it, per our earlier design choice to keep
+    staging visible) can't parse.
     """
     manifest = {
         "filename": filename,
@@ -216,8 +227,7 @@ def write_manifest(manifest_path: str, filename: str, filesize: int,
         "chunk_size": chunk_size,
         "verified_chunks": sorted(verified_chunks),
     }
-    with open(manifest_path, "w") as f:
-        json.dump(manifest, f)
+    json_store.atomic_write_json(manifest_path, manifest)
 
 
 def unique_final_path(save_dir: str, filename: str) -> str:
