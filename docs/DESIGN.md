@@ -555,7 +555,46 @@ retrofitting the wire protocol or engine internals afterward:
    round-trip, wrong code, garbage input, and tampered ciphertext all
    behave correctly.
 
-## GUI (later phase)
+## GUI planning (pre-implementation - engine/support modules done, frontend not started)
+
+**What already exists to build on** (all engine-side, tested, presentation-agnostic):
+- `pairing.py`: `create_invite()` / `accept_invite()` / `load_contacts_into_engine()`
+  - the ONLY correct way to touch `engine.known_passphrases` - never call
+  `engine.set_known_passphrase()` directly from GUI code, or a successful
+  handshake could correspond to no saved contact, a state the UI below
+  isn't designed to handle.
+- `network_info.py`: `get_public_ip()` for the "copy my info" flow -
+  returns `None` on failure (no internet, all lookup services down);
+  GUI must handle that by letting the person type their IP manually,
+  not by crashing or leaving the field blank with no explanation.
+- `contacts.py`: saved contact list, persisted via `platformdirs`.
+- Full command/event set on `Engine` (see Architecture section above),
+  including `cancel_transfer` and rate/ETA-bearing `chunk_progress`.
+
+**Unverified incoming connection - UI state (decided, not yet built):**
+`session_started` fires immediately on accept, BEFORE the handshake
+resolves - `handshake_result` (with `peer_name`) comes later and can
+take a moment. This means there's a real window where a connection
+exists but isn't yet identified - the UI needs an explicit state for
+it, not silence:
+- On `session_started`: show `Unknown (<ip>) - verifying...`
+  immediately.
+- On `handshake_result` success: update that same row in place to the
+  real name.
+- On `handshake_result` failure: show `Unknown (<ip>) - rejected`
+  BRIEFLY, then auto-dismiss (decided: failed/unauthorized attempts
+  ARE shown, briefly, rather than either staying visible indefinitely
+  or being hidden entirely - a middle ground between "no visibility
+  into who's probing your open port" and "alarming permanent clutter
+  from routine internet background noise"). Worth considering later:
+  collapsing repeated rapid failures from the same IP into one row
+  rather than spamming the list.
+
+**Still-undecided GUI-shape questions** (layout, wiring mechanism,
+connection-string UI flow) - see "Next steps" further down; not yet
+designed in detail.
+
+## Old sketch (superseded by the planning above, kept for history)
 - Top: passphrase + port fields (port remembers last used)
 - "Copy my info" button → builds connection string, copies to
   clipboard
