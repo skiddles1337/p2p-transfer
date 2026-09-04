@@ -768,8 +768,24 @@ class Engine:
         session.send_queue.put(filepath)
 
     def _send_one_file(self, session, filepath):
-        filename = sanitize_filename(os.path.basename(filepath))
-        filesize = os.path.getsize(filepath)
+        # This is a LOCAL file access problem (bad path, permissions,
+        # file deleted before we got to it) - fundamentally different
+        # from a network/connection problem, and must be handled
+        # differently: report it clearly and return, so the sender
+        # loop (see _sender_loop) moves on to the NEXT queued file.
+        # Previously this wasn't guarded at all, so an OSError here
+        # (e.g. a bad path) propagated all the way up to _sender_loop's
+        # except clause - which is designed to end the loop for a
+        # genuinely dead CONNECTION, but was doing the same thing for
+        # a simple typo in a file path, silently killing the session's
+        # ability to send anything else for the rest of its lifetime.
+        try:
+            filename = sanitize_filename(os.path.basename(filepath))
+            filesize = os.path.getsize(filepath)
+        except OSError as e:
+            self._emit("log", message=f"Could not read '{filepath}': {e}")
+            return
+
         transfer_id = os.urandom(TRANSFER_ID_LEN)
 
         transfer = OutgoingTransfer(filename, filesize, transfer_id)
