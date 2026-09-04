@@ -111,6 +111,31 @@ class PendingDecision:
         self.result = None
 
 
+class IncomingTransfer:
+    """
+    State for a file currently being received on a session. Held as
+    session.active_incoming rather than as local variables inside a
+    nested loop, so the flat reader loop can update this across
+    multiple iterations while ALSO handling unrelated messages
+    (like a FILE_ACCEPT for an outgoing offer) in between.
+    """
+    def __init__(self, filename, safe_filename, filesize, transfer_id):
+        self.filename = filename
+        self.safe_filename = safe_filename
+        self.filesize = filesize
+        self.transfer_id = transfer_id
+        self.total_chunks = math.ceil(filesize / CHUNK_SIZE) if filesize > 0 else 0
+        self.whole_file_hasher = hashlib.sha256()
+        self.verified_chunks = []
+        self.failed_chunk_indices = []
+
+        data_path, manifest_path = staging_paths(transfer_id)
+        self.data_path = data_path
+        self.manifest_path = manifest_path
+        preallocate_file(data_path, filesize)  # may raise OSError - caller handles
+        self.output_file = open(data_path, "r+b")
+
+
 class Session:
     """
     State for one connection to one peer. Each Session has its own
@@ -134,6 +159,13 @@ class Session:
         # only ever ONE outgoing offer is in flight per session at a
         # time, by construction, not by hoping callers behave.
         self.send_queue = queue.Queue()
+        # The file CURRENTLY being received on this session, if any -
+        # tracked as state here (not as "which nested loop we're
+        # inside") so the single flat reader loop can handle
+        # FILE_CHUNK/DONE for this transfer AND unrelated messages
+        # (like a FILE_ACCEPT for our own outgoing offer) arriving
+        # interleaved with it, without either one blocking the other.
+        self.active_incoming = None
 
 
 class Engine:
@@ -263,7 +295,24 @@ class Engine:
         self.sessions.pop(session.session_id, None)
         self._emit("session_closed", session_id=session.session_id, reason=reason)
 
-    # ---------- the reader loop: one per session ----------
+    # ---------- the reader loop: one per session, fully FLAT dispatch ----------
+    #
+    # Every message type is handled directly in this one loop, based
+    # purely on session state (session.active_incoming,
+    # session.pending_outgoing_offer) - NOT on which nested function
+    # call we happen to be inside. This matters once bidirectional
+    # sending is possible: a single TCP connection genuinely carries
+    # two independent logical conversations (my outgoing offer's
+    # accept/reject, and chunks for whatever I'm currently receiving),
+    # and either can arrive at any moment relative to the other. An
+    # earlier version of this loop called into a nested function
+    # (_receive_file) with its own narrow inner loop that only
+    # recognized FILE_CHUNK/DONE - a FILE_ACCEPT for our own outgoing
+    # offer arriving while that nested loop was running got treated as
+    # "unexpected" and crashed the whole session. Flattening into one
+    # dispatcher, with in-progress-transfer state tracked externally,
+    # fixes this: any message type can be handled correctly regardless
+    # of what else is going on at the same time.
 
     def _reader_loop(self, session):
         while True:
@@ -271,6 +320,12 @@ class Engine:
 
             if msg_type == MSG_FILE_OFFER:
                 self._handle_incoming_offer(session, payload)
+
+            elif msg_type == MSG_FILE_CHUNK:
+                self._handle_incoming_chunk(session, payload)
+
+            elif msg_type == MSG_DONE:
+                self._handle_incoming_done(session, payload)
 
             elif msg_type in (MSG_FILE_ACCEPT, MSG_FILE_REJECT):
                 pending = session.pending_outgoing_offer
@@ -296,6 +351,12 @@ class Engine:
         self._emit("file_offer_received", session_id=session.session_id,
                    offer_id=offer_id, filename=filename, filesize=filesize)
 
+        # This wait is a DIFFERENT kind of blocking than the old nested
+        # receive loop was: we're waiting on a human decision, not
+        # narrowly refusing to recognize other message types. Chunks
+        # for some OTHER already-active incoming transfer would simply
+        # sit in the OS socket buffer until we get back to recv_message()
+        # - not lost, just delayed, which is fine.
         decision.event.wait()
         accept = decision.result
         self.pending_incoming_offers.pop(offer_id, None)
@@ -305,82 +366,78 @@ class Engine:
                    filename=filename, accepted=accept)
 
         if accept:
-            self._receive_file(session, filename, filesize, transfer_id)
+            safe_filename = sanitize_filename(filename)
+            try:
+                session.active_incoming = IncomingTransfer(
+                    filename, safe_filename, filesize, transfer_id
+                )
+            except OSError as e:
+                self._emit("log", message=f"Could not allocate space for incoming file: {e}")
 
-    # ---------- receiving a file ----------
-
-    def _receive_file(self, session, filename, filesize, transfer_id):
-        safe_filename = sanitize_filename(filename)
-        data_path, manifest_path = staging_paths(transfer_id)
-        total_chunks = math.ceil(filesize / CHUNK_SIZE) if filesize > 0 else 0
-
-        try:
-            preallocate_file(data_path, filesize)
-        except OSError as e:
-            self._emit("log", message=f"Could not allocate space for incoming file: {e}")
+    def _handle_incoming_chunk(self, session, payload):
+        transfer = session.active_incoming
+        if transfer is None:
+            self._emit("log", message=f"Received a chunk with no active incoming "
+                                      f"transfer on session {session.session_id} - ignoring")
             return
 
-        output_file = open(data_path, "r+b")
-        whole_file_hasher = hashlib.sha256()
-        verified_chunks, failed_chunk_indices = [], []
+        chunk_index, expected_hash, encrypted_data = unpack_file_chunk(payload)
 
         try:
-            while True:
-                msg_type, msg_payload = recv_message(session.sock)
+            chunk_data = session.cipher.decrypt(encrypted_data)
+            chunk_ok = hashlib.sha256(chunk_data).digest() == expected_hash
+        except InvalidTag:
+            chunk_data = b""
+            chunk_ok = False
 
-                if msg_type == MSG_FILE_CHUNK:
-                    chunk_index, expected_hash, encrypted_data = unpack_file_chunk(msg_payload)
+        if chunk_ok:
+            transfer.verified_chunks.append(chunk_index)
+        else:
+            transfer.failed_chunk_indices.append(chunk_index)
 
-                    try:
-                        chunk_data = session.cipher.decrypt(encrypted_data)
-                        chunk_ok = hashlib.sha256(chunk_data).digest() == expected_hash
-                    except InvalidTag:
-                        chunk_data = b""
-                        chunk_ok = False
+        if chunk_data:
+            transfer.output_file.seek(chunk_index * CHUNK_SIZE)
+            transfer.output_file.write(chunk_data)
+            transfer.whole_file_hasher.update(chunk_data)
 
-                    if chunk_ok:
-                        verified_chunks.append(chunk_index)
-                    else:
-                        failed_chunk_indices.append(chunk_index)
+        write_manifest(transfer.manifest_path, transfer.filename, transfer.filesize,
+                       CHUNK_SIZE, transfer.verified_chunks)
+        self._emit("chunk_progress", session_id=session.session_id,
+                   transfer_id=transfer.transfer_id.hex(), chunk_index=chunk_index,
+                   total_chunks=transfer.total_chunks,
+                   status="ok" if chunk_ok else "failed")
 
-                    if chunk_data:
-                        output_file.seek(chunk_index * CHUNK_SIZE)
-                        output_file.write(chunk_data)
-                        whole_file_hasher.update(chunk_data)
+    def _handle_incoming_done(self, session, payload):
+        transfer = session.active_incoming
+        if transfer is None:
+            self._emit("log", message=f"Received DONE with no active incoming "
+                                      f"transfer on session {session.session_id} - ignoring")
+            return
 
-                    write_manifest(manifest_path, filename, filesize, CHUNK_SIZE, verified_chunks)
-                    self._emit("chunk_progress", session_id=session.session_id,
-                               transfer_id=transfer_id.hex(), chunk_index=chunk_index,
-                               total_chunks=total_chunks,
-                               status="ok" if chunk_ok else "failed")
+        sender_whole_hash = payload
+        our_whole_hash = transfer.whole_file_hasher.digest()
+        transfer.output_file.close()  # MUST close before any rename (Windows)
 
-                elif msg_type == MSG_DONE:
-                    sender_whole_hash = msg_payload
-                    our_whole_hash = whole_file_hasher.digest()
-                    output_file.close()  # MUST close before any rename (Windows)
+        if transfer.failed_chunk_indices:
+            detail = f"{len(transfer.failed_chunk_indices)} chunk(s) failed: {transfer.failed_chunk_indices}"
+            success = False
+        elif our_whole_hash != sender_whole_hash:
+            detail = "whole-file hash mismatch despite no flagged chunk failures"
+            success = False
+        else:
+            final_path = finalize_transfer(transfer.data_path, transfer.manifest_path,
+                                           SAVE_DIR, transfer.safe_filename)
+            detail = final_path
+            success = True
 
-                    if failed_chunk_indices:
-                        detail = f"{len(failed_chunk_indices)} chunk(s) failed: {failed_chunk_indices}"
-                        success = False
-                    elif our_whole_hash != sender_whole_hash:
-                        detail = "whole-file hash mismatch despite no flagged chunk failures"
-                        success = False
-                    else:
-                        final_path = finalize_transfer(data_path, manifest_path, SAVE_DIR, safe_filename)
-                        detail = final_path
-                        success = True
+        self._emit("file_complete", session_id=session.session_id,
+                   transfer_id=transfer.transfer_id.hex(), success=success, detail=detail)
 
-                    self._emit("file_complete", session_id=session.session_id,
-                               transfer_id=transfer_id.hex(), success=success, detail=detail)
-                    return
-
-                else:
-                    self._emit("log", message=f"Unexpected message {msg_type} during file receive")
-                    return
-
-        finally:
-            if not output_file.closed:
-                output_file.close()
+        # Clear the active transfer - this session can now accept a
+        # new incoming FILE_OFFER (or already has, if one arrived
+        # while this one was finishing - it'll be queued behind this
+        # call in the reader loop's next iteration).
+        session.active_incoming = None
 
     # ---------- COMMANDS ----------
 

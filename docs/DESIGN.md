@@ -190,6 +190,37 @@ bidirectional sending and multiple simultaneous sessions, and via
 manual `cli.py` testing (including deliberately reproducing the race
 above, both before and after the fix) for realistic human timing.
 
+**Second bug found via adversarial testing: nested dispatch loops
+can't handle interleaved bidirectional traffic.** An earlier version
+of the reader loop called into a nested function (`_receive_file`)
+with its own narrow inner loop recognizing only `FILE_CHUNK`/`DONE`.
+Testing two peers sending files to each other SIMULTANEOUSLY on the
+same connection (zero coordination delay) exposed the problem: while
+one side's reader thread was inside that nested loop receiving a file,
+the OTHER direction's `FILE_ACCEPT` (for that same side's own,
+unrelated outgoing offer) arrived interleaved on the same connection -
+and the nested loop, only expecting file-chunk-related messages,
+treated it as "unexpected" and crashed the whole session.
+
+**The fix:** flatten the reader loop into a single dispatcher that can
+handle ANY message type at any point, tracking "am I currently
+receiving a file" as state on the session object
+(`session.active_incoming`, an `IncomingTransfer` instance) rather
+than as which nested function call we happen to be inside. A
+`FILE_CHUNK`/`DONE` updates whatever transfer is currently active;
+a `FILE_ACCEPT`/`FILE_REJECT` resolves the pending outgoing offer;
+either can arrive in any order relative to the other, since they're
+genuinely independent logical conversations sharing one TCP stream.
+Verified: 5 consecutive runs of simultaneous bidirectional sends, zero
+crashes, both files arriving byte-correct on both sides.
+
+This is worth remembering as a general lesson: once two-way,
+asynchronous traffic is possible on one connection, a message
+dispatcher must never assume "the next message will be one of these
+few types" based on what it's currently doing - only based on the
+actual state of the conversation, which can have multiple independent
+threads of context active at once.
+
 ## Wire protocol — message-based framing
 Rather than hardcoding "filename, then size, then bytes" as fixed byte
 offsets, every message on the wire has a generic envelope:
