@@ -445,13 +445,35 @@ than tucking bookkeeping away in a hidden app-data folder:
 This also means contacts/config (see below) should follow the same
 pattern once implemented, rather than "a JSON file next to the app."
 
-**Packaging (deferred until after GUI is stable):** plan is
-PyInstaller, bundling the Python interpreter and all dependencies into
-a single executable - no Python install required on the end user's
-machine.
-- Windows: the realistic priority. Modern Windows (10 2004+/11) ships
-  WebView2 (needed by `pywebview`) already installed, so this should
-  work without asking the user to install anything extra.
+**Packaging (deferred until after GUI is stable, but decisions made
+now):** target is Windows first, via PyInstaller + Inno Setup.
+- **PyInstaller build mode: `--onedir`, not `--onefile`.** A
+  single-file build is more convenient to send a friend, but
+  self-extracting packed executables are meaningfully more likely to
+  trigger antivirus/Windows Defender false-positive flags, purely from
+  looking suspicious to heuristic scanners - a bad first impression
+  for something a friend is about to run. `--onedir` (a folder,
+  zipped for distribution) triggers this far less.
+- **Two genuinely different "ports" - don't conflate them:** (1) the
+  actual P2P listening port (5001), which needs router forwarding and
+  triggers a normal Windows Firewall prompt; (2) a LOCAL-ONLY channel
+  between the Python engine and the GUI frontend (websocket or
+  `pywebview`'s JS bridge), which never leaves 127.0.0.1 and never
+  triggers any firewall prompt at all, since loopback connections
+  aren't visible to Windows' network security layer.
+- **WebView2 dependency check:** most modern Windows installs already
+  have WebView2 (built into Windows 11; delivered via Windows Update
+  on Windows 10 since 2021) - but it's not guaranteed (older/locked-
+  down/LTSC installs might lack it), and pywebview can silently fall
+  back to a legacy IE-based renderer if it's missing, badly
+  undermining the "modern, animated" GUI goal. Plan: the installer
+  checks for WebView2 and silently runs Microsoft's small (~2MB)
+  "Evergreen Bootstrapper" if it's absent, before first launch.
+- **Pre-configure the firewall exception during install**, via a
+  `netsh advfirewall` command in the Inno Setup installer script,
+  rather than relying on the reactive runtime prompt - ideally
+  eliminates that friction point entirely, since permission is
+  requested once, upfront, as a normal part of installing the app.
 - Linux: explicitly deprioritized per current plan - `pywebview` needs
   system-level GTK/WebKit (or Qt/WebEngine) libraries that PyInstaller
   can't fully bundle away, since they're tied to the OS's own shared
@@ -461,9 +483,6 @@ machine.
 
 **Expected friction, to document rather than "fix" (not really
 fixable):**
-- Firewall prompts the first time the app listens on a port - normal
-  OS behavior, needs a clear line in user-facing docs ("click Allow"),
-  not something to engineer around.
 - Windows SmartScreen warning on an unsigned .exe ("Windows protected
   your PC") - normal for a personal/indie app without a paid
   code-signing certificate; document the "More info → Run anyway"
