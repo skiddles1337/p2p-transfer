@@ -16,11 +16,13 @@ design goal.
 
 import socket
 import os
-import hmac
 import hashlib
+from cryptography.fernet import Fernet, InvalidToken
 from protocol import (
     recv_message,
     pack_message,
+    pack_hello_response,
+    unpack_hello_response,
     unpack_file_offer,
     unpack_file_chunk,
     MSG_HELLO,
@@ -33,10 +35,16 @@ from protocol import (
     MSG_FILE_CHUNK,
     MSG_DONE,
     MSG_BYE,
-    CHALLENGE_LEN,
     CHUNK_SIZE,
 )
-from auth import compute_response
+from auth import compute_confirmation_tag, verify_confirmation_tag
+from keyexchange import (
+    generate_keypair,
+    public_key_to_bytes,
+    public_key_from_bytes,
+    compute_shared_secret,
+    derive_session_key,
+)
 from storage import staging_paths, write_manifest, finalize_transfer, STAGING_DIR
 
 LISTEN_PORT = 5001
@@ -56,47 +64,60 @@ def preallocate_file(path: str, filesize: int) -> None:
             f.write(b"\x00")
 
 
-def do_handshake(conn) -> bool:
+def do_handshake(conn):
     """
-    Send a random challenge, verify the peer's response proves they
-    know the shared passphrase. Returns True if the handshake
-    succeeded, False otherwise (caller should close the connection on
-    False).
+    Perform the authenticated key exchange (see docs/DESIGN.md):
+      1. Generate our own ephemeral X25519 keypair, send our public key
+      2. Receive the peer's public key + their confirmation tag; verify
+         the tag proves they know the shared passphrase for THESE
+         specific public keys (catches tampering/MITM)
+      3. Compute the shared secret, derive a session key
+      4. Send our own confirmation tag back, so the peer can verify us too
+
+    Returns a Fernet instance (ready to encrypt/decrypt chunks) on
+    success, or None on failure (caller should close the connection).
     """
-    challenge = os.urandom(CHALLENGE_LEN)
-    conn.sendall(pack_message(MSG_HELLO, challenge))
+    listener_private, listener_public = generate_keypair()
+    listener_public_bytes = public_key_to_bytes(listener_public)
+    conn.sendall(pack_message(MSG_HELLO, listener_public_bytes))
 
     msg_type, payload = recv_message(conn)
     if msg_type != MSG_HELLO_RESPONSE:
         print(f"Expected HELLO_RESPONSE, got message type {msg_type}.")
         conn.sendall(pack_message(MSG_HELLO_REJECT, b""))
-        return False
+        return None
 
-    expected_response = compute_response(challenge)
+    sender_public_bytes, sender_tag = unpack_hello_response(payload)
 
-    # hmac.compare_digest instead of == : a plain == comparison on
-    # secret-derived values can, in principle, leak timing information
-    # (it often returns as soon as the first mismatched byte is found,
-    # so comparing early-differing values is faster than comparing
-    # values that match for a while first). compare_digest always
-    # takes the same amount of time regardless of where a mismatch
-    # occurs, closing off that side-channel. Good habit any time
-    # you're comparing something that gates access.
-    if hmac.compare_digest(payload, expected_response):
-        conn.sendall(pack_message(MSG_HELLO_OK, b""))
-        print("Handshake OK - passphrase verified.")
-        return True
-    else:
+    # Verify the sender's tag proves they know the passphrase, tied to
+    # THESE exact two public keys (order: listener_pub, sender_pub).
+    if not verify_confirmation_tag(sender_tag, listener_public_bytes, sender_public_bytes):
         conn.sendall(pack_message(MSG_HELLO_REJECT, b""))
-        print("Handshake FAILED - passphrase mismatch.")
-        return False
+        print("Handshake FAILED - confirmation tag mismatch (wrong "
+              "passphrase, or a tampered/substituted key in transit).")
+        return None
+
+    # Tag verified - now compute the shared secret and session key.
+    sender_public = public_key_from_bytes(sender_public_bytes)
+    shared_secret = compute_shared_secret(listener_private, sender_public)
+    session_key = derive_session_key(shared_secret)
+
+    # Send OUR confirmation tag back, so the sender can verify us too -
+    # note the REVERSED order (sender_pub, listener_pub) vs. the tag we
+    # just checked, to prevent a reflection attack.
+    our_tag = compute_confirmation_tag(sender_public_bytes, listener_public_bytes)
+    conn.sendall(pack_message(MSG_HELLO_OK, our_tag))
+
+    print("Handshake OK - key exchange authenticated, session key established.")
+    return Fernet(session_key)
 
 
-def receive_file(conn, filename: str, filesize: int, transfer_id: bytes) -> None:
+def receive_file(conn, filename: str, filesize: int, transfer_id: bytes, fernet: Fernet) -> None:
     """
     Receive one file's worth of FILE_CHUNK messages, followed by DONE.
-    Same logic as previous steps - staging, offset writes, per-chunk
-    hashing, finalize-only-on-full-success.
+    Each chunk arrives ENCRYPTED - we decrypt first, then hash the
+    resulting plaintext to check against the sender's hash (which was
+    computed over the original plaintext on their end).
     """
     data_path, manifest_path = staging_paths(transfer_id)
 
@@ -118,22 +139,35 @@ def receive_file(conn, filename: str, filesize: int, transfer_id: bytes) -> None
         msg_type, msg_payload = recv_message(conn)
 
         if msg_type == MSG_FILE_CHUNK:
-            chunk_index, expected_hash, chunk_data = unpack_file_chunk(msg_payload)
-            actual_hash = hashlib.sha256(chunk_data).digest()
-            chunk_ok = (actual_hash == expected_hash)
+            chunk_index, expected_hash, encrypted_data = unpack_file_chunk(msg_payload)
+
+            try:
+                chunk_data = fernet.decrypt(encrypted_data)
+                actual_hash = hashlib.sha256(chunk_data).digest()
+                chunk_ok = (actual_hash == expected_hash)
+            except InvalidToken:
+                # Fernet's own authentication failed - the ciphertext
+                # was tampered with or corrupted badly enough that it
+                # doesn't even decrypt cleanly. Treat this the same as
+                # a hash mismatch: this chunk failed, but keep going.
+                chunk_data = b""
+                chunk_ok = False
+                print(f"  Chunk {chunk_index}: DECRYPTION FAILED (corrupted ciphertext)")
 
             if not chunk_ok:
                 failed_chunk_indices.append(chunk_index)
-                print(f"  Chunk {chunk_index}: HASH MISMATCH")
+                if chunk_data:  # only print hash-mismatch message if we got this far
+                    print(f"  Chunk {chunk_index}: HASH MISMATCH")
             else:
                 verified_chunks.append(chunk_index)
                 print(f"  Chunk {chunk_index}: OK ({len(chunk_data)} bytes)")
 
-            output_file.seek(chunk_index * CHUNK_SIZE)
-            output_file.write(chunk_data)
-            whole_file_hasher.update(chunk_data)
-            chunks_received += 1
+            if chunk_data:
+                output_file.seek(chunk_index * CHUNK_SIZE)
+                output_file.write(chunk_data)
+                whole_file_hasher.update(chunk_data)
 
+            chunks_received += 1
             write_manifest(manifest_path, filename, filesize, CHUNK_SIZE, verified_chunks)
 
         elif msg_type == MSG_DONE:
@@ -167,7 +201,8 @@ def handle_session(conn, addr) -> None:
     """
     print(f"Connection received from {addr}")
 
-    if not do_handshake(conn):
+    fernet = do_handshake(conn)
+    if fernet is None:
         print("Handshake failed - closing connection.")
         return
 
@@ -184,7 +219,7 @@ def handle_session(conn, addr) -> None:
 
             if answer == "y":
                 conn.sendall(pack_message(MSG_FILE_ACCEPT, b""))
-                receive_file(conn, filename, filesize, transfer_id)
+                receive_file(conn, filename, filesize, transfer_id, fernet)
             else:
                 conn.sendall(pack_message(MSG_FILE_REJECT, b""))
                 print(f"Rejected '{filename}'.")

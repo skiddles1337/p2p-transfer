@@ -2,30 +2,26 @@
 sender.py
 
 Connects to a listener and runs a full SESSION:
-  1. HELLO handshake - receive a random challenge, respond with proof
-     of knowing the shared passphrase (HMAC), without ever sending the
-     passphrase itself
+  1. Authenticated key exchange (X25519 Diffie-Hellman, confirmed via
+     HMAC tags derived from the shared passphrase) - establishes a
+     fresh, strong session key WITHOUT the passphrase or the key
+     itself ever touching the wire (see docs/DESIGN.md)
   2. For each file in FILES_TO_SEND: offer it, wait for accept/reject,
-     send it (chunked, hashed) if accepted
+     send it (chunked, hashed, and now ENCRYPTED) if accepted
   3. Send BYE, close the connection
-
-Handshake detail: the listener sends a random CHALLENGE. We prove we
-know the shared passphrase by computing HMAC-SHA256(challenge, key=
-passphrase) and sending that back - the passphrase itself never
-touches the wire. This is a meaningfully stronger design than just
-sending the passphrase directly: even someone capturing this entire
-exchange can't recover the passphrase from it, since HMAC is a one-way
-function (its whole design goal is being infeasible to reverse).
 """
 
 import socket
 import os
 import hashlib
+from cryptography.fernet import Fernet
 from protocol import (
     pack_message,
     recv_message,
     pack_file_offer,
     pack_file_chunk,
+    pack_hello_response,
+    unpack_hello_response,
     MSG_HELLO,
     MSG_HELLO_RESPONSE,
     MSG_HELLO_OK,
@@ -39,41 +35,74 @@ from protocol import (
     CHUNK_SIZE,
     TRANSFER_ID_LEN,
 )
-from auth import compute_response
+from auth import compute_confirmation_tag, verify_confirmation_tag
+from keyexchange import (
+    generate_keypair,
+    public_key_to_bytes,
+    public_key_from_bytes,
+    compute_shared_secret,
+    derive_session_key,
+)
 
 TARGET_IP = "127.0.0.1"
 TARGET_PORT = 5001
 
 # Edit this list to test sending multiple files in one session.
-FILES_TO_SEND = ["test_file1.txt", "test_file2.txt", "test_file3.txt"]
+FILES_TO_SEND = ["test_file.txt"]
 
 
-def do_handshake(sock) -> bool:
+def do_handshake(sock):
     """
-    Wait for the listener's challenge, respond with proof of knowing
-    the shared passphrase. Returns True if the listener accepted it.
+    Perform the authenticated key exchange from the sender's side -
+    the mirror image of listener.py's do_handshake. Returns a Fernet
+    instance on success, or None on failure.
     """
-    msg_type, challenge = recv_message(sock)
+    msg_type, listener_public_bytes = recv_message(sock)
     if msg_type != MSG_HELLO:
         print(f"Expected HELLO, got message type {msg_type}.")
-        return False
+        return None
 
-    response = compute_response(challenge)
-    sock.sendall(pack_message(MSG_HELLO_RESPONSE, response))
+    sender_private, sender_public = generate_keypair()
+    sender_public_bytes = public_key_to_bytes(sender_public)
 
-    msg_type, _ = recv_message(sock)
-    if msg_type == MSG_HELLO_OK:
-        print("Handshake OK.")
-        return True
-    else:
+    # Prove we know the passphrase, tied to THESE two exact public
+    # keys (order: listener_pub, sender_pub - must match what the
+    # listener checks against).
+    tag = compute_confirmation_tag(listener_public_bytes, sender_public_bytes)
+    response_payload = pack_hello_response(sender_public_bytes, tag)
+    sock.sendall(pack_message(MSG_HELLO_RESPONSE, response_payload))
+
+    msg_type, listener_tag = recv_message(sock)
+    if msg_type != MSG_HELLO_OK:
         print("Handshake REJECTED by listener - passphrase mismatch?")
-        return False
+        return None
+
+    # Verify the LISTENER's tag too (reversed order: sender_pub,
+    # listener_pub) - this is what protects US from connecting to an
+    # impostor pretending to be our friend.
+    if not verify_confirmation_tag(listener_tag, sender_public_bytes, listener_public_bytes):
+        print("Handshake FAILED - listener's confirmation tag is invalid. "
+              "Possible tampering - aborting.")
+        return None
+
+    listener_public = public_key_from_bytes(listener_public_bytes)
+    shared_secret = compute_shared_secret(sender_private, listener_public)
+    session_key = derive_session_key(shared_secret)
+
+    print("Handshake OK - key exchange authenticated, session key established.")
+    return Fernet(session_key)
 
 
-def send_file(sock, filepath: str) -> None:
+def send_file(sock, filepath: str, fernet: Fernet) -> None:
     """
-    Offer one file, and if accepted, send it in hashed chunks followed
-    by DONE. Same logic as previous steps.
+    Offer one file, and if accepted, send it in hashed, ENCRYPTED
+    chunks followed by DONE.
+
+    Important ordering: we hash the PLAINTEXT chunk first, then
+    encrypt it. This means the hash (and the whole-file hash sent in
+    DONE) always reflects the actual original file content, regardless
+    of encryption - encryption is about keeping the data secret in
+    transit, not about what "correct" means for integrity checking.
     """
     filename = os.path.basename(filepath)
     filesize = os.path.getsize(filepath)
@@ -103,13 +132,16 @@ def send_file(sock, filepath: str) -> None:
             if chunk == b"":
                 break
 
-            whole_file_hasher.update(chunk)
-            chunk_payload = pack_file_chunk(chunk_index, chunk)
+            whole_file_hasher.update(chunk)  # hash the PLAINTEXT
+            chunk_hash = hashlib.sha256(chunk).digest()
+            encrypted_chunk = fernet.encrypt(chunk)
+
+            chunk_payload = pack_file_chunk(chunk_index, chunk_hash, encrypted_chunk)
             sock.sendall(pack_message(MSG_FILE_CHUNK, chunk_payload))
 
             bytes_sent += len(chunk)
-            print(f"  Sent chunk {chunk_index} ({len(chunk)} bytes, "
-                  f"{bytes_sent}/{filesize} total)")
+            print(f"  Sent chunk {chunk_index} ({len(chunk)} plaintext bytes, "
+                  f"{len(encrypted_chunk)} encrypted, {bytes_sent}/{filesize} total)")
             chunk_index += 1
 
     final_hash = whole_file_hasher.digest()
@@ -128,13 +160,14 @@ def main():
     client_socket.connect((TARGET_IP, TARGET_PORT))
     print("Connected.")
 
-    if not do_handshake(client_socket):
+    fernet = do_handshake(client_socket)
+    if fernet is None:
         print("Handshake failed. Closing connection.")
         client_socket.close()
         return
 
     for filepath in FILES_TO_SEND:
-        send_file(client_socket, filepath)
+        send_file(client_socket, filepath, fernet)
 
     client_socket.sendall(pack_message(MSG_BYE, b""))
     print("Sent BYE.")

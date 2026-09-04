@@ -17,21 +17,18 @@ import hashlib
 
 # --- Message types ---
 # Each is just a distinct integer (0-255, since we're using 1 byte).
-MSG_HELLO = 1       # payload: 16 random bytes (a "challenge"), sent by
-                     # the listener immediately after accepting a
-                     # connection - see the handshake docs in sender.py
+MSG_HELLO = 1       # payload: listener's X25519 public key (32 bytes)
 MSG_FILE_OFFER = 2  # payload: filesize (8) + transfer_id (16) + filename
 MSG_FILE_DATA = 3   # payload: the raw file content (whole file) - being
                      # replaced by chunked transfer, kept for reference
 MSG_FILE_CHUNK = 4  # payload: chunk index (4 bytes) + chunk hash (32 bytes)
-                     # + chunk data (remaining bytes)
-MSG_DONE = 5        # payload: SHA-256 hash of the ENTIRE file (32 bytes) -
+                     # + chunk data (remaining bytes, ENCRYPTED)
+MSG_DONE = 5        # payload: SHA-256 hash of the ENTIRE (plaintext) file -
                      # sent once, after all chunks, to signal "that's
                      # everything" and let the receiver do a final check
-MSG_HELLO_RESPONSE = 6  # payload: HMAC-SHA256(challenge, key=passphrase) -
-                         # proves the sender knows the passphrase WITHOUT
-                         # ever transmitting the passphrase itself
-MSG_HELLO_OK = 7        # payload: empty - handshake succeeded
+MSG_HELLO_RESPONSE = 6  # payload: sender's X25519 public key (32 bytes)
+                         # + confirmation tag (32 bytes) = 64 bytes total
+MSG_HELLO_OK = 7        # payload: listener's confirmation tag (32 bytes)
 MSG_HELLO_REJECT = 8    # payload: empty - handshake failed, connection
                          # will close right after this is sent
 MSG_FILE_ACCEPT = 9     # payload: empty - receiver agreed to this FILE_OFFER
@@ -39,11 +36,11 @@ MSG_FILE_REJECT = 10    # payload: empty - receiver declined this FILE_OFFER
 MSG_BYE = 11            # payload: empty - sender signals no more files,
                          # session is ending
 
-# Size of the random challenge sent in MSG_HELLO, and of the HMAC-SHA256
-# response to it. Both are fixed sizes, so no length-prefix needed for
-# these payloads - they're used as-is.
-CHALLENGE_LEN = 16
-HELLO_RESPONSE_LEN = 32  # HMAC-SHA256 always produces a 32-byte digest
+# X25519 public keys and HMAC-SHA256 confirmation tags are both always
+# exactly 32 bytes - fixed sizes, letting us slice a combined payload
+# (like HELLO_RESPONSE's pubkey+tag) at a known position.
+PUBLIC_KEY_LEN = 32
+CONFIRMATION_TAG_LEN = 32
 
 # How many bytes we read/send per chunk. 1 MB is a reasonable default -
 # big enough to be efficient, small enough to keep memory usage low
@@ -175,20 +172,27 @@ def unpack_file_offer(payload: bytes) -> tuple[str, int, bytes]:
     return filename, filesize, transfer_id
 
 
-def pack_file_chunk(chunk_index: int, chunk_data: bytes) -> bytes:
+def pack_file_chunk(chunk_index: int, chunk_hash: bytes, chunk_data: bytes) -> bytes:
     """
     Build the payload for a FILE_CHUNK message:
 
         [ 4 bytes  : chunk index ]
-        [ 32 bytes : SHA-256 hash of chunk_data ]
+        [ 32 bytes : chunk_hash (caller-provided) ]
         [ remaining bytes : chunk_data itself ]
 
     The index lets both sides refer to "chunk #7" unambiguously (useful
-    later for requesting a specific chunk be resent). The hash lets the
-    receiver verify this specific chunk arrived intact.
+    later for requesting a specific chunk be resent).
+
+    NOTE: chunk_hash is no longer computed here (it used to be, in an
+    earlier version) - it's passed in already computed. This matters
+    once encryption is involved: we want to hash the ORIGINAL plaintext
+    chunk (so corruption of actual file content is what we detect),
+    but chunk_data here may be the ENCRYPTED bytes actually being sent.
+    Computing the hash internally from chunk_data would hash whichever
+    one the caller happened to pass in - separating the two makes the
+    caller's intent explicit rather than implicit.
     """
     index_bytes = struct.pack(CHUNK_INDEX_FORMAT, chunk_index)
-    chunk_hash = hashlib.sha256(chunk_data).digest()
     return index_bytes + chunk_hash + chunk_data
 
 
@@ -207,6 +211,24 @@ def unpack_file_chunk(payload: bytes) -> tuple[int, bytes, bytes]:
     (chunk_index,) = struct.unpack(CHUNK_INDEX_FORMAT, index_bytes)
 
     return chunk_index, hash_bytes, chunk_data
+
+
+def pack_hello_response(sender_public_key_bytes: bytes, tag: bytes) -> bytes:
+    """
+    Build the payload for a HELLO_RESPONSE message: the sender's public
+    key immediately followed by its confirmation tag - both fixed-size,
+    so no length prefix is needed, same principle as FILE_CHUNK's layout.
+    """
+    return sender_public_key_bytes + tag
+
+
+def unpack_hello_response(payload: bytes) -> tuple[bytes, bytes]:
+    """
+    Given a HELLO_RESPONSE payload, return (sender_public_key_bytes, tag).
+    """
+    public_key_bytes = payload[:PUBLIC_KEY_LEN]
+    tag = payload[PUBLIC_KEY_LEN:PUBLIC_KEY_LEN + CONFIRMATION_TAG_LEN]
+    return public_key_bytes, tag
 
 
 if __name__ == "__main__":
