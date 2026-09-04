@@ -15,6 +15,7 @@ the pairing flow.
 
 import urllib.request
 import urllib.error
+import webbrowser
 
 # Tried in order - a single service being down, blocked, or rate-
 # limiting doesn't leave this feature completely broken. Each of these
@@ -59,6 +60,25 @@ def _looks_like_an_ipv4_address(text: str) -> bool:
     if len(parts) != 4:
         return False
     return all(part.isdigit() and 0 <= int(part) <= 255 for part in parts)
+
+
+def open_port_check_tool() -> None:
+    """
+    Opens a reputable third-party port-checking website in the
+    person's default browser, so they can manually verify their port
+    forwarding actually works before asking a friend to test it
+    blindly (or before wondering why a real connection attempt failed
+    later).
+
+    Deliberately NOT automated or scraped on our end: most of these
+    sites use an internal form submission rather than a stable,
+    documented URL interface, so trying to pre-fill the port or parse
+    a result programmatically would be fragile and could silently
+    break the moment the site changes its page layout. The person
+    types their own port in manually - one extra step, but nothing
+    here depends on the site's internals, so it can't quietly break.
+    """
+    webbrowser.open("https://canyouseeme.org/")
 
 
 if __name__ == "__main__":

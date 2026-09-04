@@ -567,6 +567,12 @@ retrofitting the wire protocol or engine internals afterward:
   returns `None` on failure (no internet, all lookup services down);
   GUI must handle that by letting the person type their IP manually,
   not by crashing or leaving the field blank with no explanation.
+  Also `open_port_check_tool()` - a small "test my connectivity"
+  button next to the port field, opens canyouseeme.org in the
+  person's browser. Deliberately manual (person types their own port
+  in) rather than automated/scraped - reputable port-check sites don't
+  offer stable, documented APIs, so pre-filling or parsing a result
+  programmatically would be fragile and could silently break.
 - `contacts.py`: saved contact list, persisted via `platformdirs`.
 - Full command/event set on `Engine` (see Architecture section above),
   including `cancel_transfer` and rate/ETA-bearing `chunk_progress`.
@@ -589,6 +595,71 @@ it, not silence:
   from routine internet background noise"). Worth considering later:
   collapsing repeated rapid failures from the same IP into one row
   rather than spamming the list.
+
+**Decided: no one-off/"guest" connections.** Every connection must go
+through real pairing (`pairing.py`) first - no temporary/anonymous
+trust option. This reinforces rather than complicates the invariant
+above: a successful handshake always corresponds to a saved contact,
+with no exception to design around.
+
+**Connection failure messaging - the engine already distinguishes
+enough to show specific, helpful messages, not a generic "failed":**
+
+| Event | Likely cause | Suggested message |
+|---|---|---|
+| `session_closed` with `reason: "Could not connect: ..."` | Stale IP - contact's home IP changed since you saved them | "Couldn't reach `<name>` — have they changed networks? Ask for an updated invite." |
+| `handshake_result` with `reason` mentioning timeout | Reached them, but their app didn't respond in time | "Connected, but `<name>`'s app didn't respond — is it running?" |
+| `handshake_result` with `reason: "Authentication failed"` | Reached them, but passphrase mismatch - given the no-guest-connections rule, should be rare (corrupted/stale saved contact) | "Security check failed — this contact may need to be re-paired." |
+
+No engine changes needed for this - purely a GUI-layer mapping from
+existing event reasons to specific copy, instead of one generic
+"connection failed" message for every case.
+
+**System notifications - decided: browser Notification API, not a
+Python library.** Fits the existing `pywebview` + web frontend
+architecture with zero new dependencies - the frontend reacts to a
+`file_offer_received` event and shows the notification itself,
+consistent with "engine emits, frontend reacts." WebView2 (Windows'
+`pywebview` backend) supports this, including real Windows toast
+notifications. Honest tradeoff: requires a one-time browser-style
+permission prompt, which can feel slightly unusual in a desktop app
+context - acceptable given the dependency savings and architectural
+fit; revisit if it feels wrong once actually built (a presentation-
+layer-only change, doesn't touch the engine).
+
+**Drag-and-drop / multi-file sending - decided: N files dropped = N
+separate sequential offers**, not one offer containing multiple files.
+Reuses `send_file()`'s existing queueing behavior exactly as-is - no
+protocol change needed. Drag-and-drop itself is a frontend concern
+(native browser APIs), not an engine concern.
+
+**Transfer history (implemented):** `history.py` - standalone,
+`contacts.py`-style persistence (`platformdirs`, JSON) for a local
+record of past transfers (direction, peer, filename, size, success,
+detail, timestamp). Capped at 500 entries (oldest trimmed) - a
+personal tool doesn't need unbounded history, and an ever-growing file
+would slowly cost more to load/save. The GUI (or a future automation-
+CLI) is responsible for calling `record_transfer()` when a
+`file_complete` event arrives - this module doesn't listen to the
+engine directly, keeping it decoupled and independently testable, same
+as `contacts.py`.
+
+**Close-app-mid-transfer warning - decided: yes, warn first.**
+`Engine.has_active_transfers()` (implemented) - True if ANY session
+has a transfer in progress (checks `active_incoming`/`active_outgoing`
+across all sessions), for the GUI to check before allowing the app to
+close. Worth being clear about WHY this is a warning and not a hard
+block: closing mid-transfer isn't actually destructive - staging
+preserves partial data, resumable later - so this is about giving the
+person a heads-up and a chance to reconsider, not preventing data loss
+that wouldn't otherwise happen. Verified: correctly False before/after
+a transfer, True while one is genuinely in progress, on both sides of
+a real connection.
+
+## GUI next steps (not yet designed)
+Layout, the concrete event→frontend wiring mechanism (websocket vs.
+pywebview's JS bridge), and the connection-string UI flow itself still
+need to be designed before any frontend code is written.
 
 **Still-undecided GUI-shape questions** (layout, wiring mechanism,
 connection-string UI flow) - see "Next steps" further down; not yet

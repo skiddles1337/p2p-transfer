@@ -811,6 +811,23 @@ class Engine:
         decision.result = accept
         decision.event.set()
 
+    def has_active_transfers(self) -> bool:
+        """
+        True if ANY session currently has a transfer in progress
+        (sending or receiving) - meant for the GUI to check before
+        letting the person close the app, so it can warn "you have an
+        active transfer" rather than silently killing it mid-flight.
+
+        Note: closing mid-transfer isn't actually DESTRUCTIVE (staging
+        preserves partial data, resumable later) - this check is about
+        giving the person a heads-up and a chance to reconsider, not
+        preventing data loss that wouldn't otherwise happen.
+        """
+        return any(
+            session.active_incoming is not None or session.active_outgoing is not None
+            for session in self.sessions.values()
+        )
+
     def close_session(self, session_id):
         session = self.sessions.get(session_id)
         if session is None:
