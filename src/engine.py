@@ -94,9 +94,8 @@ from storage import (
     preallocate_file,
     sanitize_filename,
     STAGING_DIR,
+    SAVE_DIR,
 )
-
-SAVE_DIR = "received"
 
 
 class PendingDecision:
@@ -129,7 +128,7 @@ class IncomingTransfer:
         self.verified_chunks = []
         self.failed_chunk_indices = []
 
-        data_path, manifest_path = staging_paths(transfer_id)
+        data_path, manifest_path = staging_paths(transfer_id, safe_filename)
         self.data_path = data_path
         self.manifest_path = manifest_path
         preallocate_file(data_path, filesize)  # may raise OSError - caller handles

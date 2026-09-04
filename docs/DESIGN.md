@@ -414,8 +414,72 @@ redesign.
   remembering for any future code that renames/moves files that were
   just written to.
 
+## Distribution & installation planning
+The target audience is a normal Windows (priority) or Linux user with
+no Python installed and no interest in a terminal - not a developer.
+A few decisions made now, and a few deliberately deferred:
+
+**Storage locations (implemented):** `storage.py` no longer uses
+relative paths ("received/", "received/.partial/") - those depended
+entirely on whatever folder the script happened to be launched from,
+which breaks for a packaged, double-clicked app (it might run from
+Program Files, often not writable by a normal user, or an
+unpredictable temp extraction folder). Now uses `platformdirs` to
+find the OS-appropriate Downloads location, with both finished and
+in-progress transfers deliberately kept VISIBLE and browsable, rather
+than tucking bookkeeping away in a hidden app-data folder:
+- `SAVE_DIR` → `Downloads/P2P Transfer/` - finished files, same idea
+  as where a browser puts its downloads.
+- `STAGING_DIR` → `Downloads/P2P Transfer/Partial Downloads/` - a
+  deliberate design choice, not just "where the temp files happen to
+  live": in-progress/incomplete transfers are genuinely interesting to
+  see, and this is exactly the state a future "resume" feature will
+  read from. Staged files are named `<original filename>.<full
+  transfer_id hex>.part` (+ matching `.json` manifest) rather than
+  just the raw transfer_id, so someone browsing this folder can
+  immediately tell what a given file IS ("vacation_photo.jpg.5b0673...
+  .part") instead of seeing an opaque hash. The manifest is
+  plain, readable JSON (`{"filename": ..., "verified_chunks": [0, 2]}`)
+  - genuinely legible if someone opens it out of curiosity, and
+  exactly what a resume feature needs to know "what's still missing."
+This also means contacts/config (see below) should follow the same
+pattern once implemented, rather than "a JSON file next to the app."
+
+**Packaging (deferred until after GUI is stable):** plan is
+PyInstaller, bundling the Python interpreter and all dependencies into
+a single executable - no Python install required on the end user's
+machine.
+- Windows: the realistic priority. Modern Windows (10 2004+/11) ships
+  WebView2 (needed by `pywebview`) already installed, so this should
+  work without asking the user to install anything extra.
+- Linux: explicitly deprioritized per current plan - `pywebview` needs
+  system-level GTK/WebKit (or Qt/WebEngine) libraries that PyInstaller
+  can't fully bundle away, since they're tied to the OS's own shared
+  libraries. Revisit if Linux support becomes a real priority later.
+- Packaging a moving target wastes effort - deliberately building this
+  only once the GUI itself is done, not alongside it.
+
+**Expected friction, to document rather than "fix" (not really
+fixable):**
+- Firewall prompts the first time the app listens on a port - normal
+  OS behavior, needs a clear line in user-facing docs ("click Allow"),
+  not something to engineer around.
+- Windows SmartScreen warning on an unsigned .exe ("Windows protected
+  your PC") - normal for a personal/indie app without a paid
+  code-signing certificate; document the "More info → Run anyway"
+  click-through.
+- Port forwarding remains manual - no fully reliable way to automate
+  this across arbitrary home routers. UPnP could offer a "try this
+  first, fall back to manual" experience later for routers that
+  support it, but manual instructions will always need to remain the
+  real fallback (many routers disable UPnP by default).
+
 ## Contacts
-- Saved locally in a JSON file next to the app.
+- Will be saved via the same `platformdirs`-based approach as other
+  storage (see Distribution & installation planning above), NOT "a
+  JSON file next to the app" as originally sketched - that assumption
+  predates the storage-location fix and has the same portability
+  problem relative paths did.
 - Each contact stores: name, ip, port, passphrase (since passphrases
   are treated as semi-permanent per relationship, not re-typed each
   time — user's call, may regenerate per session if preferred).

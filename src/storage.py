@@ -18,12 +18,36 @@ protocol logic in protocol.py. Specifically:
     out of staging into its final location, with a collision-safe
     name (appending " (1)", " (2)", etc. if the name is already taken)
     - similar to how browsers handle duplicate downloads.
+
+STORAGE LOCATIONS: these used to be plain relative paths ("received/",
+"received/.partial/"), which meant where files actually landed
+depended entirely on whatever folder the script happened to be
+launched from - fine for development, but fragile for a real
+installed app (a double-clicked .exe might run from Program Files,
+which a normal user often can't even write to, or some unpredictable
+temp extraction folder). We now use `platformdirs` to find a proper,
+OS-appropriate Downloads location instead:
+
+  - SAVE_DIR: where FINISHED files actually land - under the user's
+    Downloads folder, in a "P2P Transfer" subfolder, since that's
+    where people already expect to find things a program downloaded
+    for them, same idea as a web browser's downloads.
+  - STAGING_DIR: in-progress transfers and their manifests. Previously
+    this was a hidden, internal app-data location - but in-progress
+    downloads are genuinely interesting to see (their existence is
+    what a future "resume" feature will build on), so this now lives
+    right alongside finished downloads, in a visible "Partial
+    Downloads" subfolder - browsable, not hidden away.
 """
 
 import os
 import json
+import platformdirs
 
-STAGING_DIR = os.path.join("received", ".partial")
+APP_NAME = "p2p-transfer"
+
+SAVE_DIR = os.path.join(platformdirs.user_downloads_dir(), "P2P Transfer")
+STAGING_DIR = os.path.join(SAVE_DIR, "Partial Downloads")
 
 # Characters forbidden in filenames on Windows (some are also awkward
 # elsewhere). We replace rather than reject outright, so a peer
@@ -88,14 +112,23 @@ def preallocate_file(path: str, filesize: int) -> None:
             f.write(b"\x00")
 
 
-def staging_paths(transfer_id: bytes) -> tuple[str, str]:
+def staging_paths(transfer_id: bytes, filename: str) -> tuple[str, str]:
     """
-    Given a transfer_id, return (data_path, manifest_path) - the two
-    files used to track this transfer while it's incomplete.
+    Given a transfer_id and the (already sanitized) filename, return
+    (data_path, manifest_path) - the two files used to track this
+    transfer while it's incomplete.
+
+    The filename is included in the actual name on disk (not just the
+    transfer_id) so someone browsing the "Partial Downloads" folder
+    can immediately tell what a given .part file IS, rather than
+    seeing only an opaque hex string. The full transfer_id is still
+    included too, guaranteeing uniqueness even if the same filename is
+    offered more than once (e.g. a retried or duplicate transfer)
+    without needing any separate collision-detection logic.
     """
     hex_id = transfer_id.hex()
-    data_path = os.path.join(STAGING_DIR, f"{hex_id}.part")
-    manifest_path = os.path.join(STAGING_DIR, f"{hex_id}.json")
+    data_path = os.path.join(STAGING_DIR, f"{filename}.{hex_id}.part")
+    manifest_path = os.path.join(STAGING_DIR, f"{filename}.{hex_id}.json")
     return data_path, manifest_path
 
 

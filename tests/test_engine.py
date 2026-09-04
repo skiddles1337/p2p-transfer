@@ -82,9 +82,10 @@ def test_bidirectional_on_one_connection():
     stop_a.set()
     stop_b.set()
 
-    a_received = os.path.exists("received/file_from_A.bin") if os.path.exists("received") else False
-    # Note: both engines share the same "received/" working dir in
-    # this test process, so we check by hash/size instead where useful.
+    # Files now land in the platform Downloads folder (see
+    # storage.py's SAVE_DIR), not a relative "received/" path - so
+    # correctness here is verified via the file_complete events
+    # printed above (both engines' event logs), not a path check.
     print("Bidirectional test finished - check EVENT logs above for two "
           "separate file_complete events, one in each direction.")
 
