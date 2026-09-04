@@ -25,6 +25,7 @@ from protocol import (
     MSG_FILE_CHUNK,
     MSG_DONE,
     CHUNK_SIZE,
+    TRANSFER_ID_LEN,
 )
 
 TARGET_IP = "127.0.0.1"
@@ -47,8 +48,15 @@ def main():
     client_socket.connect((TARGET_IP, TARGET_PORT))
     print("Connected.")
 
+    # A fresh random ID for this specific transfer attempt. Not used
+    # for resume logic yet, but included now so a future resume
+    # feature can recognize a reconnect as "continuing this transfer"
+    # without relying on filename matching.
+    transfer_id = os.urandom(TRANSFER_ID_LEN)
+    print(f"Transfer ID: {transfer_id.hex()}")
+
     # Step 1: announce the incoming file.
-    offer_payload = pack_file_offer(FILE_TO_SEND, filesize)
+    offer_payload = pack_file_offer(FILE_TO_SEND, filesize, transfer_id)
     offer_message = pack_message(MSG_FILE_OFFER, offer_payload)
     client_socket.sendall(offer_message)
     print(f"Sent FILE_OFFER - filename='{FILE_TO_SEND}', size={filesize}")
