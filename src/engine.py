@@ -12,8 +12,9 @@ needs to know about sockets, threads, or the wire protocol at all.
 COMMANDS (methods on Engine):
     start_listening(port)
     stop_listening()
-    connect_to_peer(ip, port) -> session_id
+    connect_to_peer(ip, port, passphrase, peer_name=None) -> session_id
     send_file(session_id, filepath)
+    cancel_transfer(session_id, transfer_id_hex)
     respond_to_offer(offer_id, accept: bool)
     close_session(session_id)
 
@@ -24,7 +25,11 @@ EVENTS (dicts pulled from engine.event_queue, each with a "type"):
     file_offer_received {session_id, offer_id, filename, filesize}
     file_offer_answered {session_id, filename, accepted}
     chunk_progress      {session_id, transfer_id, chunk_index,
-                          total_chunks, status}   status: "sent" | "ok" | "failed"
+                          total_chunks, status, bytes_transferred,
+                          total_bytes, bytes_per_second, eta_seconds}
+                          status: "sent" | "ok" | "failed". Rate/ETA
+                          fields are None until enough time has
+                          elapsed to estimate meaningfully.
     file_complete       {session_id, transfer_id, success, detail}
     session_closed      {session_id, reason}
 
@@ -53,6 +58,7 @@ import queue
 import itertools
 import os
 import math
+import time
 import hashlib
 from chunk_crypto import ChunkCipher
 from cryptography.exceptions import InvalidTag
@@ -76,10 +82,11 @@ from protocol import (
     MSG_FILE_CHUNK,
     MSG_DONE,
     MSG_BYE,
+    MSG_CANCEL,
     CHUNK_SIZE,
     TRANSFER_ID_LEN,
 )
-from auth import compute_confirmation_tag, verify_confirmation_tag
+from auth import compute_confirmation_tag, verify_confirmation_tag, find_matching_passphrase
 from keyexchange import (
     generate_keypair,
     public_key_to_bytes,
@@ -96,6 +103,24 @@ from storage import (
     STAGING_DIR,
     SAVE_DIR,
 )
+
+
+def _compute_rate_and_eta(start_time, bytes_done, total_bytes):
+    """
+    Given when a transfer started, how many bytes have been processed
+    so far, and the total expected, return (bytes_per_second,
+    eta_seconds). Shared by both the sending and receiving paths so
+    the math (and its rough edges - e.g. near-zero elapsed time right
+    at the start) only needs to be handled correctly once.
+    """
+    elapsed = time.monotonic() - start_time
+    if elapsed <= 0 or bytes_done <= 0:
+        return None, None
+
+    bytes_per_second = bytes_done / elapsed
+    bytes_remaining = max(total_bytes - bytes_done, 0)
+    eta_seconds = bytes_remaining / bytes_per_second if bytes_per_second > 0 else None
+    return bytes_per_second, eta_seconds
 
 
 class PendingDecision:
@@ -127,6 +152,8 @@ class IncomingTransfer:
         self.whole_file_hasher = hashlib.sha256()
         self.verified_chunks = []
         self.failed_chunk_indices = []
+        self.start_time = time.monotonic()
+        self.bytes_processed = 0
 
         data_path, manifest_path = staging_paths(transfer_id, safe_filename)
         self.data_path = data_path
@@ -165,6 +192,19 @@ class Session:
         # (like a FILE_ACCEPT for our own outgoing offer) arriving
         # interleaved with it, without either one blocking the other.
         self.active_incoming = None
+        # The file CURRENTLY being sent on this session, if any - a
+        # dict with "transfer_id" and "cancel_event" (threading.Event).
+        # The send loop checks cancel_event between chunks; setting it
+        # (via cancel_transfer()) is how we ask an in-progress send to
+        # stop early.
+        self.active_outgoing = None
+        # Set once the handshake succeeds. For an INBOUND session,
+        # this is whichever known_passphrases entry matched (i.e. who
+        # we now know is connecting). For an OUTBOUND session, this
+        # stays None here - the caller already knows who they called;
+        # see connect_to_peer's peer_name parameter if you want that
+        # tracked too.
+        self.peer_name = None
 
 
 class Engine:
@@ -173,12 +213,30 @@ class Engine:
         self.sessions = {}
         self.pending_incoming_offers = {}
 
+        # {name: passphrase} - the set of passphrases this engine will
+        # accept from an INCOMING connection. During a listener-side
+        # handshake, each is tried in turn (see auth.find_matching_
+        # passphrase) - whichever matches both authenticates the
+        # connection and identifies who it is. Managed via
+        # set_known_passphrase()/remove_known_passphrase() below;
+        # typically populated from saved contacts.
+        self.known_passphrases = {}
+
         self._session_id_counter = itertools.count(1)
         self._offer_id_counter = itertools.count(1)
 
         self._listen_socket = None
         self._listen_thread = None
         self._stop_listening_flag = threading.Event()
+
+    def set_known_passphrase(self, name, passphrase):
+        """Register (or update) a passphrase this engine should accept
+        from an incoming connection, under the given name."""
+        self.known_passphrases[name] = passphrase
+
+    def remove_known_passphrase(self, name):
+        """Stop accepting a previously-registered passphrase."""
+        self.known_passphrases.pop(name, None)
 
     # ---------- internal helpers ----------
 
@@ -196,6 +254,13 @@ class Engine:
     # ---------- handshake ----------
 
     def _do_handshake_as_listener(self, session):
+        """
+        Returns (ChunkCipher, matched_name) on success, or (None, None)
+        on failure. matched_name is whichever entry in
+        self.known_passphrases produced a matching tag - this is how
+        the listener learns WHO just connected, without them having
+        stated it anywhere.
+        """
         conn = session.sock
         listener_private, listener_public = generate_keypair()
         listener_public_bytes = public_key_to_bytes(listener_public)
@@ -204,23 +269,30 @@ class Engine:
         msg_type, payload = recv_message(conn)
         if msg_type != MSG_HELLO_RESPONSE:
             self._send(session, MSG_HELLO_REJECT, b"")
-            return None
+            return None, None
 
         sender_public_bytes, sender_tag = unpack_hello_response(payload)
-        if not verify_confirmation_tag(sender_tag, listener_public_bytes, sender_public_bytes):
+
+        matched_name = find_matching_passphrase(
+            sender_tag, listener_public_bytes, sender_public_bytes,
+            self.known_passphrases,
+        )
+        if matched_name is None:
             self._send(session, MSG_HELLO_REJECT, b"")
-            return None
+            return None, None
+
+        matched_passphrase = self.known_passphrases[matched_name]
 
         sender_public = public_key_from_bytes(sender_public_bytes)
         shared_secret = compute_shared_secret(listener_private, sender_public)
         session_key = derive_session_key(shared_secret)
 
-        our_tag = compute_confirmation_tag(sender_public_bytes, listener_public_bytes)
+        our_tag = compute_confirmation_tag(matched_passphrase, sender_public_bytes, listener_public_bytes)
         self._send(session, MSG_HELLO_OK, our_tag)
 
-        return ChunkCipher(session_key)
+        return ChunkCipher(session_key), matched_name
 
-    def _do_handshake_as_sender(self, session):
+    def _do_handshake_as_sender(self, session, passphrase):
         sock = session.sock
         msg_type, listener_public_bytes = recv_message(sock)
         if msg_type != MSG_HELLO:
@@ -229,13 +301,13 @@ class Engine:
         sender_private, sender_public = generate_keypair()
         sender_public_bytes = public_key_to_bytes(sender_public)
 
-        tag = compute_confirmation_tag(listener_public_bytes, sender_public_bytes)
+        tag = compute_confirmation_tag(passphrase, listener_public_bytes, sender_public_bytes)
         self._send(session, MSG_HELLO_RESPONSE, pack_hello_response(sender_public_bytes, tag))
 
         msg_type, listener_tag = recv_message(sock)
         if msg_type != MSG_HELLO_OK:
             return None
-        if not verify_confirmation_tag(listener_tag, sender_public_bytes, listener_public_bytes):
+        if not verify_confirmation_tag(listener_tag, passphrase, sender_public_bytes, listener_public_bytes):
             return None
 
         listener_public = public_key_from_bytes(listener_public_bytes)
@@ -253,17 +325,18 @@ class Engine:
     # forever with no way to notice or recover.
     HANDSHAKE_TIMEOUT_SECONDS = 15
 
-    def _run_session(self, session, as_listener):
+    def _run_session(self, session, as_listener, passphrase=None):
         self.sessions[session.session_id] = session
         self._emit("session_started", session_id=session.session_id,
                    peer_addr=session.addr, direction=session.direction)
 
         session.sock.settimeout(self.HANDSHAKE_TIMEOUT_SECONDS)
+        matched_name = None
         try:
             if as_listener:
-                cipher = self._do_handshake_as_listener(session)
+                cipher, matched_name = self._do_handshake_as_listener(session)
             else:
-                cipher = self._do_handshake_as_sender(session)
+                cipher = self._do_handshake_as_sender(session, passphrase)
         except socket.timeout:
             self._emit("handshake_result", session_id=session.session_id,
                        success=False, reason="Handshake timed out - peer sent nothing")
@@ -294,7 +367,11 @@ class Engine:
             return
 
         session.cipher = cipher
-        self._emit("handshake_result", session_id=session.session_id, success=True, reason=None)
+        if matched_name is not None:
+            session.peer_name = matched_name  # inbound: identified via passphrase match
+        # outbound sessions already have peer_name set (if provided) by connect_to_peer
+        self._emit("handshake_result", session_id=session.session_id, success=True,
+                   reason=None, peer_name=session.peer_name)
 
         # One dedicated thread per session, draining send_queue one
         # file at a time - this is what guarantees only one outgoing
@@ -359,6 +436,9 @@ class Engine:
                     pending.result = (msg_type == MSG_FILE_ACCEPT)
                     pending.event.set()
 
+            elif msg_type == MSG_CANCEL:
+                self._handle_cancel(session, payload)
+
             elif msg_type == MSG_BYE:
                 self._emit("log", message=f"Peer sent BYE on session {session.session_id}")
                 return
@@ -400,11 +480,47 @@ class Engine:
             except OSError as e:
                 self._emit("log", message=f"Could not allocate space for incoming file: {e}")
 
+    def _handle_cancel(self, session, transfer_id_bytes):
+        """
+        The peer sent MSG_CANCEL for a specific transfer_id. Check
+        both directions - it might be cancelling something WE are
+        sending (stop our send loop), or telling us THEY won't send us
+        any more of something we're receiving (abort our incoming
+        transfer). At most one of these will actually match, since
+        transfer_id is randomly unique per transfer.
+        """
+        if session.active_outgoing and session.active_outgoing["transfer_id"] == transfer_id_bytes:
+            session.active_outgoing["cancel_event"].set()
+
+        if session.active_incoming and session.active_incoming.transfer_id == transfer_id_bytes:
+            self._abort_incoming(session, reason="cancelled by peer")
+
+    def _abort_incoming(self, session, reason):
+        """
+        Stop receiving the currently-active incoming transfer early
+        (peer cancelled it, or we're cancelling it ourselves). The
+        partial data stays in staging - same "leave it resumable"
+        philosophy as a chunk failure or dropped connection, just
+        triggered intentionally instead of by an error.
+        """
+        transfer = session.active_incoming
+        if transfer is None:
+            return
+        if not transfer.output_file.closed:
+            transfer.output_file.close()
+        self._emit("file_complete", session_id=session.session_id,
+                   transfer_id=transfer.transfer_id.hex(), success=False, detail=reason)
+        session.active_incoming = None
+
     def _handle_incoming_chunk(self, session, payload):
         transfer = session.active_incoming
         if transfer is None:
-            self._emit("log", message=f"Received a chunk with no active incoming "
-                                      f"transfer on session {session.session_id} - ignoring")
+            # Expected and harmless in one common case: we (or the
+            # peer) just cancelled this transfer, but a few chunks
+            # that were already in flight before the cancel took
+            # effect are still arriving. Not a protocol violation -
+            # just network timing - so this stays quiet rather than
+            # looking like something's wrong.
             return
 
         chunk_index, expected_hash, encrypted_data = unpack_file_chunk(payload)
@@ -426,12 +542,22 @@ class Engine:
             transfer.output_file.write(chunk_data)
             transfer.whole_file_hasher.update(chunk_data)
 
+        # Count bytes toward the rate/ETA estimate regardless of
+        # whether the chunk passed its hash check - what matters for
+        # "how fast is data arriving" is wire throughput, not validity.
+        transfer.bytes_processed += len(encrypted_data)
+        bytes_per_second, eta_seconds = _compute_rate_and_eta(
+            transfer.start_time, transfer.bytes_processed, transfer.filesize
+        )
+
         write_manifest(transfer.manifest_path, transfer.filename, transfer.filesize,
                        CHUNK_SIZE, transfer.verified_chunks)
         self._emit("chunk_progress", session_id=session.session_id,
                    transfer_id=transfer.transfer_id.hex(), chunk_index=chunk_index,
                    total_chunks=transfer.total_chunks,
-                   status="ok" if chunk_ok else "failed")
+                   status="ok" if chunk_ok else "failed",
+                   bytes_transferred=transfer.bytes_processed, total_bytes=transfer.filesize,
+                   bytes_per_second=bytes_per_second, eta_seconds=eta_seconds)
 
     def _handle_incoming_done(self, session, payload):
         transfer = session.active_incoming
@@ -511,7 +637,13 @@ class Engine:
                 pass
         self._emit("log", message="Stopped listening.")
 
-    def connect_to_peer(self, ip, port):
+    def connect_to_peer(self, ip, port, passphrase, peer_name=None):
+        """
+        peer_name is optional and purely informational (e.g. "connecting
+        to Alex") - unlike the listener side, an outbound connection
+        already knows who it's calling; peer_name just lets that be
+        reflected back in session.peer_name / events, for a nicer UI.
+        """
         session_id = next(self._session_id_counter)
 
         def worker():
@@ -524,7 +656,8 @@ class Engine:
                 return
 
             session = Session(session_id, sock, (ip, port), direction="outbound")
-            self._run_session(session, as_listener=False)
+            session.peer_name = peer_name
+            self._run_session(session, as_listener=False, passphrase=passphrase)
 
         threading.Thread(target=worker, daemon=True).start()
         return session_id
@@ -565,6 +698,9 @@ class Engine:
         transfer_id = os.urandom(TRANSFER_ID_LEN)
         total_chunks = math.ceil(filesize / CHUNK_SIZE) if filesize > 0 else 0
 
+        cancel_event = threading.Event()
+        session.active_outgoing = {"transfer_id": transfer_id, "cancel_event": cancel_event}
+
         decision = PendingDecision()
         session.pending_outgoing_offer = decision
 
@@ -578,6 +714,7 @@ class Engine:
         if not decision.result:
             self._emit("file_offer_answered", session_id=session.session_id,
                        filename=filename, accepted=False)
+            session.active_outgoing = None
             return
 
         self._emit("file_offer_answered", session_id=session.session_id,
@@ -586,9 +723,15 @@ class Engine:
         whole_file_hasher = hashlib.sha256()
         chunk_index = 0
         bytes_sent = 0
+        cancelled = False
+        start_time = time.monotonic()
 
         with open(filepath, "rb") as f:
             while True:
+                if cancel_event.is_set():
+                    cancelled = True
+                    break
+
                 chunk = f.read(CHUNK_SIZE)
                 if chunk == b"":
                     break
@@ -601,15 +744,63 @@ class Engine:
                 self._send(session, MSG_FILE_CHUNK, chunk_payload)
 
                 bytes_sent += len(chunk)
+                bytes_per_second, eta_seconds = _compute_rate_and_eta(
+                    start_time, bytes_sent, filesize
+                )
                 self._emit("chunk_progress", session_id=session.session_id,
                            transfer_id=transfer_id.hex(), chunk_index=chunk_index,
-                           total_chunks=total_chunks, status="sent")
+                           total_chunks=total_chunks, status="sent",
+                           bytes_transferred=bytes_sent, total_bytes=filesize,
+                           bytes_per_second=bytes_per_second, eta_seconds=eta_seconds)
                 chunk_index += 1
 
-        final_hash = whole_file_hasher.digest()
-        self._send(session, MSG_DONE, final_hash)
-        self._emit("file_complete", session_id=session.session_id,
-                   transfer_id=transfer_id.hex(), success=True, detail="sent")
+        if cancelled:
+            self._send(session, MSG_CANCEL, transfer_id)
+            self._emit("file_complete", session_id=session.session_id,
+                       transfer_id=transfer_id.hex(), success=False, detail="cancelled")
+        else:
+            final_hash = whole_file_hasher.digest()
+            self._send(session, MSG_DONE, final_hash)
+            self._emit("file_complete", session_id=session.session_id,
+                       transfer_id=transfer_id.hex(), success=True, detail="sent")
+
+        session.active_outgoing = None
+
+    def cancel_transfer(self, session_id, transfer_id_hex):
+        """
+        Cancel a specific in-progress transfer, identified by its
+        transfer_id (as a hex string, matching how it's already
+        exposed in chunk_progress/file_complete events). Works for
+        either direction: if we're SENDING it, signals our own send
+        loop to stop early and tells the peer via MSG_CANCEL; if we're
+        RECEIVING it, tells the peer to stop sending (via MSG_CANCEL)
+        and aborts our own reception immediately.
+        """
+        session = self.sessions.get(session_id)
+        if session is None:
+            self._emit("log", message=f"No such session {session_id} to cancel on")
+            return
+
+        try:
+            transfer_id = bytes.fromhex(transfer_id_hex)
+        except ValueError:
+            self._emit("log", message=f"Invalid transfer_id for cancel: {transfer_id_hex}")
+            return
+
+        if session.active_outgoing and session.active_outgoing["transfer_id"] == transfer_id:
+            session.active_outgoing["cancel_event"].set()
+            return
+
+        if session.active_incoming and session.active_incoming.transfer_id == transfer_id:
+            try:
+                self._send(session, MSG_CANCEL, transfer_id)
+            except OSError:
+                pass
+            self._abort_incoming(session, reason="cancelled locally")
+            return
+
+        self._emit("log", message=f"No active transfer {transfer_id_hex} "
+                                  f"to cancel on session {session_id}")
 
     def respond_to_offer(self, offer_id, accept):
         entry = self.pending_incoming_offers.get(offer_id)

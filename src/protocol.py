@@ -35,6 +35,11 @@ MSG_FILE_ACCEPT = 9     # payload: empty - receiver agreed to this FILE_OFFER
 MSG_FILE_REJECT = 10    # payload: empty - receiver declined this FILE_OFFER
 MSG_BYE = 11            # payload: empty - sender signals no more files,
                          # session is ending
+MSG_CANCEL = 12         # payload: transfer_id (16 bytes) - either side can
+                         # send this to abort a specific in-progress transfer;
+                         # the OTHER side stops sending/receiving that
+                         # transfer's chunks and treats it as an intentional
+                         # stop, not an error
 
 # X25519 public keys and HMAC-SHA256 confirmation tags are both always
 # exactly 32 bytes - fixed sizes, letting us slice a combined payload

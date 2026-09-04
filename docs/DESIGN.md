@@ -503,6 +503,58 @@ fixable):**
   are treated as semi-permanent per relationship, not re-typed each
   time — user's call, may regenerate per session if preferred).
 
+## Pre-GUI engine features (implemented)
+Five pieces of groundwork built before frontend code exists, so the
+GUI is built against a stable command/event shape rather than
+retrofitting the wire protocol or engine internals afterward:
+
+1. **Multi-passphrase, identity-revealing handshake.** `auth.py`'s
+   confirmation tag functions take an explicit passphrase (no more
+   single global `SHARED_PASSPHRASE`). `Engine.set_known_passphrase(
+   name, passphrase)` / `remove_known_passphrase(name)` register what
+   a LISTENER will accept; during handshake, `auth.
+   find_matching_passphrase()` tries each known passphrase against the
+   incoming tag - whichever matches both authenticates the connection
+   AND identifies who it is (`session.peer_name`), surfaced in the
+   `handshake_result` event. `connect_to_peer(ip, port, passphrase,
+   peer_name=None)` takes the specific passphrase for whoever you're
+   calling. Verified: two different peers, two different passphrases,
+   one listener - both correctly identified.
+2. **Cancel-in-progress transfers.** New `MSG_CANCEL` message
+   (transfer_id payload) and `cancel_transfer(session_id,
+   transfer_id_hex)` command. Works symmetrically: cancelling a
+   transfer you're SENDING signals your own send loop to stop (via a
+   per-transfer `threading.Event`) and tells the peer via `MSG_CANCEL`;
+   cancelling one you're RECEIVING tells the peer to stop sending and
+   aborts your own reception immediately. Partial data stays in
+   staging either way - same "leave it resumable" philosophy as a
+   chunk failure or dropped connection, just triggered intentionally.
+   Verified from both directions with a large (300MB) file, cancelling
+   after only ~4 of 300 chunks.
+3. **Rate/ETA in progress events.** `chunk_progress` now includes
+   `bytes_transferred`, `total_bytes`, `bytes_per_second`,
+   `eta_seconds` (computed engine-side via a shared
+   `_compute_rate_and_eta` helper, used by both the send and receive
+   paths) - deliberately NOT left for the frontend to infer from
+   websocket message timing, which would be noisy.
+4. **`contacts.py`** - standalone, engine-independent persistence for
+   saved contacts (name/ip/port/passphrase), using the same
+   `platformdirs` approach as other storage (a config directory, not
+   "a JSON file next to the app").
+5. **`connection_string.py`** - the actual encode/decode logic for the
+   shareable pairing string, implementing the layered security design
+   from earlier: a short, human-typed PAIRING CODE (PBKDF2-derived key,
+   200,000 iterations) encrypts a blob containing name/ip/port/PLUS an
+   auto-generated session PASSPHRASE - the latter being what actually
+   gets used for handshake confirmation tags (item 1 above), never the
+   weak pairing code directly. Reuses `chunk_crypto.ChunkCipher`
+   rather than inventing a second encryption mechanism. Any failure
+   (wrong code, corrupted string, garbage input) collapses to the same
+   generic `None` - deliberately not distinguishing why, so a failed
+   attempt doesn't hand an attacker a calibration signal. Verified:
+   round-trip, wrong code, garbage input, and tampered ciphertext all
+   behave correctly.
+
 ## GUI (later phase)
 - Top: passphrase + port fields (port remembers last used)
 - "Copy my info" button → builds connection string, copies to
