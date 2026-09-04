@@ -245,21 +245,48 @@ class Engine:
 
     # ---------- session lifecycle ----------
 
+    # How long to wait for a peer to complete the handshake before
+    # giving up. This ONLY applies during the handshake - once
+    # established, a session should be able to sit idle indefinitely
+    # (waiting for the next file offer, possibly minutes or hours
+    # later) without being killed. A silent/hung peer during the
+    # handshake itself, though, would otherwise tie up a thread
+    # forever with no way to notice or recover.
+    HANDSHAKE_TIMEOUT_SECONDS = 15
+
     def _run_session(self, session, as_listener):
         self.sessions[session.session_id] = session
         self._emit("session_started", session_id=session.session_id,
                    peer_addr=session.addr, direction=session.direction)
 
+        session.sock.settimeout(self.HANDSHAKE_TIMEOUT_SECONDS)
         try:
             if as_listener:
                 cipher = self._do_handshake_as_listener(session)
             else:
                 cipher = self._do_handshake_as_sender(session)
+        except socket.timeout:
+            self._emit("handshake_result", session_id=session.session_id,
+                       success=False, reason="Handshake timed out - peer sent nothing")
+            self._cleanup_session(session, reason="handshake timeout")
+            return
         except (ConnectionError, OSError) as e:
             self._emit("handshake_result", session_id=session.session_id,
                        success=False, reason=str(e))
             self._cleanup_session(session, reason="handshake error")
             return
+        finally:
+            # Whether it succeeded, failed, or timed out, remove the
+            # handshake-specific timeout before anything else uses
+            # this socket - an established session's reader loop must
+            # be able to wait indefinitely for the next message. The
+            # socket may already be closed at this point (if a
+            # timeout/error path above already called
+            # _cleanup_session) - that's fine, nothing left to do.
+            try:
+                session.sock.settimeout(None)
+            except OSError:
+                pass
 
         if cipher is None:
             self._emit("handshake_result", session_id=session.session_id,
@@ -598,6 +625,24 @@ class Engine:
         session = self.sessions.get(session_id)
         if session is None:
             return
+
+        # Anything still QUEUED (not yet started) gets explicitly
+        # reported as cancelled, rather than silently vanishing when
+        # the session actually closes. Note: this does NOT cover a
+        # send that's already IN PROGRESS (pulled off the queue,
+        # offer already sent) - that one will still race with BYE and
+        # typically surface as a connection error, same as closing a
+        # connection mid-transfer always would.
+        while True:
+            try:
+                dropped_filepath = session.send_queue.get_nowait()
+            except queue.Empty:
+                break
+            if dropped_filepath is None:
+                continue  # the stop-sentinel, not a real queued file
+            self._emit("log", message=f"Cancelled queued send (session "
+                                      f"{session.session_id} closing): {dropped_filepath}")
+
         try:
             self._send(session, MSG_BYE, b"")
         except OSError:

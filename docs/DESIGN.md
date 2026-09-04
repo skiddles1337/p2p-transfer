@@ -221,6 +221,52 @@ few types" based on what it's currently doing - only based on the
 actual state of the conversation, which can have multiple independent
 threads of context active at once.
 
+## Adversarial testing round (before GUI work)
+Beyond the two bugs above, a deliberate round of testing specific
+"break it on purpose" scenarios turned up smaller findings:
+
+- **Closing a session with files still queued to send:** originally,
+  `close_session()` just sent `BYE` immediately - any files still
+  sitting in `send_queue` (not yet started) silently vanished with no
+  event at all. Fixed: `close_session()` now drains the queue first
+  and emits a `log` event for each cancelled file, so a future UI can
+  show clearly what got cut off rather than files just disappearing.
+  (A send already IN PROGRESS when close happens still isn't
+  gracefully aborted - it typically surfaces as a connection error,
+  same as closing any connection mid-transfer always would; considered
+  acceptable for now.)
+- **Double-responding to the same offer** (e.g. a UI double-click):
+  tested both same-value (accept, accept) and conflicting
+  (accept, reject) rapid double-calls. Both are safe - no crash, no
+  duplicate transfer. Conflicting rapid calls deterministically let
+  the second call win (last-write-wins), which is a reasonable
+  semantic; a stale response to an already-resolved offer_id is
+  correctly rejected with a clear log message rather than doing
+  anything surprising.
+- **Multiple peers connecting at the literal same instant** (not just
+  staggered by a few hundred ms): tested three peers connecting and
+  sending simultaneously to one listener. All three sessions and
+  transfers completed correctly and independently - confirms the
+  per-connection threading model holds up under genuine, not just
+  staggered, concurrency.
+- **A peer that connects and sends nothing** (hung, flaky, or
+  malicious): originally, this tied up one thread FOREVER, blocked
+  inside `recv_message()` waiting for a `HELLO_RESPONSE` that would
+  never come - not a crash, and it didn't block OTHER sessions
+  (each has its own thread), but an unbounded resource leak (connect
+  many silent sockets, leak many threads). Fixed: a
+  `HANDSHAKE_TIMEOUT_SECONDS` (15s) applies ONLY during the handshake
+  phase - `socket.settimeout()` is set before the handshake and
+  explicitly cleared (back to indefinite) immediately after, success
+  or failure. This is deliberately NOT a general per-session timeout:
+  an established session must be able to sit idle indefinitely
+  (waiting for the next file offer, possibly minutes or hours later)
+  without being killed - only the bounded, short handshake phase
+  benefits from a deadline. (Fixing this surfaced a small secondary
+  bug: the cleanup path could close the socket before a `finally`
+  block tried to reset its timeout, raising `OSError: Bad file
+  descriptor` - fixed by guarding that call.)
+
 ## Wire protocol — message-based framing
 Rather than hardcoding "filename, then size, then bytes" as fixed byte
 offsets, every message on the wire has a generic envelope:
