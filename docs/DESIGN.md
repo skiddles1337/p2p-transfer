@@ -158,15 +158,49 @@ deliberately verified via testing, not just assumed.
   accept/reject, cancel) and data channel (file chunks), since the
   generic message envelope makes interleaving both kinds of messages
   on one socket straightforward.
-- A session: connect → authenticated handshake → loop of file offers
-  (each accepted/rejected, transferred if accepted, either direction) →
-  `BYE` to close.
+- A session: connect → authenticated handshake → any number of file
+  offers, in either direction → `BYE` to close.
 - Rejecting one file does not close the session. Only an explicit
   `BYE`, or a connection failure, ends it.
 - Failure isolation comes from per-file, per-chunk state (transfer_id +
   manifest — see §7), not from separate connections — this state
   survives independently of any particular connection's lifetime,
   which is what will make real resume possible later.
+
+**Multiple offers, concurrent decisions, sequential transfer.**
+Several files can be offered at once (e.g. selecting multiple files to
+send together) and each is independently accept/reject-able, in any
+order, without one waiting on another. Actual byte-transfer stays
+sequential, though — only one accepted transfer's chunks are ever
+flowing on the wire at a given moment, processed in the order each was
+accepted. This is a deliberate middle ground: true interleaving of
+multiple transfers' chunks on one socket would be a substantially
+larger, riskier change for no real bandwidth benefit (it's the same
+connection either way) — this gets the practical UX benefit (see
+several offers, decide independently, look around before committing)
+without that complexity.
+
+This required real wire protocol changes: `FILE_ACCEPT`/`FILE_REJECT`/
+`FILE_CHUNK`/`DONE` all now carry `transfer_id` (previously, with only
+ever one active transfer per session, there was nothing to
+disambiguate). Engine-side, `active_incoming`/`active_outgoing` became
+per-transfer dicts (not single slots), offer-answer-waiting moved off
+the reader thread onto a dedicated thread per offer (so one pending
+decision can never block the reader loop from seeing the next offer),
+and a dedicated per-session queue processes accepted transfers one at
+a time.
+
+A genuine race condition was found and fixed during this work: sending
+the accept response *before* the receiving side had finished setting
+up to actually receive (allocating the incoming-transfer record) meant
+that on a fast/local connection, the very first chunk(s) could arrive
+before the receiver was ready for them, and got silently dropped —
+producing a whole-file hash mismatch with no chunk ever explicitly
+flagged as failed. Reproduced via repeated stress-testing (not
+consistently on a single run), fixed by reordering: set up to receive
+*before* telling the peer they may start sending. Verified with 70+
+stress-test iterations across both a small and a larger file
+afterward, zero failures.
 
 ## 6. Architecture: engine / presentation separation
 
@@ -273,14 +307,22 @@ Message types (all implemented and tested):
 - `FILE_OFFER` (2) — transfer_id (16 bytes), filesize, filename
 - *(3 is a deliberate gap — an early whole-file-in-one-message design,
   fully replaced by chunking, removed as dead code)*
-- `FILE_CHUNK` (4) — chunk index + SHA-256 hash of the plaintext chunk
-  + the chunk data, encrypted (`[12-byte nonce][ciphertext+16-byte tag]`)
-- `DONE` (5) — whole-file hash of the plaintext, sent after all chunks
+- `FILE_CHUNK` (4) — transfer_id (16 bytes) + chunk index + SHA-256
+  hash of the plaintext chunk + the chunk data, encrypted (`[12-byte
+  nonce][ciphertext+16-byte tag]`) — transfer_id added when concurrent
+  offers/transfers per session became possible (see §5); with only
+  ever one active transfer per session (the original design), there
+  was nothing to disambiguate
+- `DONE` (5) — transfer_id (16 bytes) + whole-file hash of the
+  plaintext, sent after all chunks
 - `HELLO_RESPONSE` (6) — sender's X25519 public key + confirmation tag
 - `HELLO_OK` (7) — listener's own confirmation tag (reversed key order
   from `HELLO_RESPONSE`'s, preventing a reflection attack)
 - `HELLO_REJECT` (8) — handshake failed; connection closes right after
-- `FILE_ACCEPT` (9) / `FILE_REJECT` (10) — receiver's per-file decision
+- `FILE_ACCEPT` (9) / `FILE_REJECT` (10) — transfer_id (16 bytes) —
+  receiver's decision for a SPECIFIC offer (also added for concurrent
+  offers — previously empty, since only one offer was ever outstanding
+  at a time)
 - `BYE` (11) — either side signals the session is closing
 - `MSG_CANCEL` (12) — transfer_id; either side can abort a specific
   in-progress transfer; the other side stops sending/receiving that

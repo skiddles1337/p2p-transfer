@@ -259,6 +259,28 @@ def unique_final_path(save_dir: str, filename: str) -> str:
         counter += 1
 
 
+def open_save_dir_in_explorer() -> None:
+    """
+    Opens the current save directory in the OS's file explorer/Finder,
+    cross-platform - so a GUI "open downloads folder" button just
+    works regardless of OS. Creates the directory first if it doesn't
+    exist yet (e.g. nothing's been received there yet) - opening a
+    nonexistent folder would just fail silently otherwise.
+    """
+    import sys
+    import subprocess
+
+    path = get_save_dir()
+    os.makedirs(path, exist_ok=True)
+
+    if sys.platform == "win32":
+        os.startfile(path)
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", path])
+    else:
+        subprocess.Popen(["xdg-open", path])
+
+
 def finalize_transfer(data_path: str, manifest_path: str,
                        save_dir: str, filename: str) -> str:
     """

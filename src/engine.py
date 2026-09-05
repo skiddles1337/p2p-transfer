@@ -38,20 +38,32 @@ EVENTS (dicts pulled from engine.event_queue, each with a "type"):
 ARCHITECTURE NOTES:
 - Each session (one connection to one peer) gets exactly one dedicated
   READER thread, whose only job is to loop on recv_message() and react.
-  Sending happens from WHATEVER thread calls send_file() or responds
-  to an offer - never from the reader thread itself. This split is
-  what makes bidirectional sending possible: nothing is ever stuck
-  only-listening or only-sending.
+  Sending happens from dedicated per-session threads (see below) or
+  whatever thread responds to an offer - never from the reader thread
+  itself. This split is what makes bidirectional sending possible:
+  nothing is ever stuck only-listening or only-sending.
 - Since two threads could otherwise try to write to the same socket at
   once (corrupting the byte stream), every session has a send_lock
   that must be held during any sendall() call on that socket.
 - Incoming file offers use a "PendingDecision" (a threading.Event +
-  a place to store the answer) so the reader thread can BLOCK waiting
-  for a decision without blocking any OTHER session's reader thread -
-  each session's wait is independent.
-- Outgoing offers use the same PendingDecision pattern, but from the
-  opposite direction: the SENDING thread waits for the reader thread
-  to receive and record a FILE_ACCEPT/FILE_REJECT.
+  a place to store the answer), waited on by a dedicated thread PER
+  OFFER (not the reader thread itself) - this is what lets several
+  offers arrive and be decided independently, without one's pending
+  decision blocking the reader loop from seeing the next.
+- Outgoing offers do NOT use PendingDecision at all - since offering
+  no longer waits for a decision before moving on, there's nothing to
+  block. A FILE_ACCEPT/FILE_REJECT is handled directly, synchronously,
+  right in the reader loop's dispatch.
+- Offering/deciding is fully concurrent (several offers can be pending
+  at once, in either direction) - but actual BYTE-TRANSFER stays
+  sequential per session, via a dedicated queue
+  (accepted_send_queue) and its own thread that processes one
+  accepted transfer at a time, start to finish, before the next. This
+  is a deliberate middle ground: true interleaving of multiple
+  transfers' chunks on one socket would be a much larger, riskier
+  change for no real bandwidth benefit (it's the same connection
+  either way) - this gets the practical benefit (see several offers,
+  decide independently) without that complexity.
 """
 
 import socket
@@ -74,6 +86,8 @@ from protocol import (
     unpack_file_offer,
     pack_file_chunk,
     unpack_file_chunk,
+    pack_done,
+    unpack_done,
     MSG_HELLO,
     MSG_HELLO_RESPONSE,
     MSG_HELLO_OK,
@@ -176,10 +190,11 @@ class OutgoingTransfer:
     completely as incoming progress - an asymmetry that would
     otherwise be a real, confusing gap for a GUI to work around.
     """
-    def __init__(self, filename, filesize, transfer_id):
+    def __init__(self, filename, filesize, transfer_id, filepath):
         self.filename = filename
         self.filesize = filesize
         self.transfer_id = transfer_id
+        self.filepath = filepath
         self.total_chunks = math.ceil(filesize / CHUNK_SIZE) if filesize > 0 else 0
         self.start_time = time.monotonic()
         self.bytes_sent = 0
@@ -200,28 +215,39 @@ class Session:
         self.direction = direction  # "inbound" or "outbound"
         self.cipher = None
         self.send_lock = threading.Lock()
-        # Set while THIS side has an offer out, awaiting the peer's answer.
-        self.pending_outgoing_offer = None
-        # Files queued to send on this session - a DEDICATED sender
-        # thread (started once the handshake succeeds) drains this
-        # one at a time. This is what prevents multiple send_file()
-        # calls from racing each other over pending_outgoing_offer -
-        # only ever ONE outgoing offer is in flight per session at a
-        # time, by construction, not by hoping callers behave.
+        # Files queued to send on this session - a DEDICATED offer
+        # thread (started once the handshake succeeds) drains this one
+        # at a time, sending an OFFER for each immediately (not waiting
+        # for a decision) - this is what lets multiple files' offers
+        # all appear at once, independently decidable, rather than
+        # strictly one-at-a-time.
         self.send_queue = queue.Queue()
-        # The file CURRENTLY being received on this session, if any -
-        # tracked as state here (not as "which nested loop we're
-        # inside") so the single flat reader loop can handle
-        # FILE_CHUNK/DONE for this transfer AND unrelated messages
-        # (like a FILE_ACCEPT for our own outgoing offer) arriving
-        # interleaved with it, without either one blocking the other.
-        self.active_incoming = None
-        # The file CURRENTLY being sent on this session, if any - an
-        # OutgoingTransfer instance (see above), or None. The send
-        # loop checks its cancel_event between chunks; setting that
-        # event (via cancel_transfer()) is how we ask an in-progress
-        # send to stop early.
-        self.active_outgoing = None
+        # transfer_id (bytes) -> OutgoingTransfer, for every offer that
+        # has been SENT but not yet answered, PLUS every ACCEPTED
+        # transfer still being sent. Multiple entries can coexist -
+        # several offers can be pending decision at once - but only
+        # ONE accepted transfer's chunks are ever actually being sent
+        # at any given moment (see accepted_send_queue below);
+        # concurrent DECIDING is supported, concurrent BYTE-TRANSFER
+        # deliberately is not (same total bandwidth either way, and
+        # true interleaving would be a much larger, riskier change for
+        # no real speed benefit).
+        self.active_outgoing = {}
+        # Accepted transfer_ids waiting their turn to actually have
+        # their chunks sent - a SEPARATE dedicated thread (the "chunk
+        # sender", started alongside the offer sender) drains this one
+        # at a time. This is the mechanism that keeps actual
+        # byte-transfer sequential even though offering/deciding is
+        # fully concurrent.
+        self.accepted_send_queue = queue.Queue()
+        # transfer_id (bytes) -> IncomingTransfer, for every offer WE
+        # accepted, tracked by transfer_id (not a single slot) since
+        # more than one could be accepted before any actually starts
+        # receiving chunks - the sender's own sequencing (above) is
+        # what ensures only one is ever actually "hot" (receiving
+        # chunk data) at a time, but preallocated/accepted-and-waiting
+        # entries can coexist here.
+        self.active_incoming = {}
         # Set once the handshake succeeds. For an INBOUND session,
         # this is whichever known_passphrases entry matched (i.e. who
         # we now know is connecting). For an OUTBOUND session, this
@@ -407,11 +433,18 @@ class Engine:
         self._emit("handshake_result", session_id=session.session_id, success=True,
                    reason=None, peer_name=session.peer_name)
 
-        # One dedicated thread per session, draining send_queue one
-        # file at a time - this is what guarantees only one outgoing
-        # offer is ever in flight on this session at once.
+        # Two dedicated threads per session, alongside the reader loop:
+        # one drains send_queue, firing an OFFER for each queued file
+        # immediately (not waiting for a decision) - this is what lets
+        # several files' offers all appear at once. The other drains
+        # accepted_send_queue, actually sending chunks one transfer at
+        # a time - this is what keeps real byte-transfer sequential
+        # even when multiple offers were accepted close together.
         threading.Thread(
             target=self._sender_loop, args=(session,), daemon=True
+        ).start()
+        threading.Thread(
+            target=self._chunk_sender_loop, args=(session,), daemon=True
         ).start()
 
         try:
@@ -429,6 +462,7 @@ class Engine:
         except OSError:
             pass
         session.send_queue.put(None)  # sentinel: stop this session's sender thread
+        session.accepted_send_queue.put(None)  # sentinel: stop the chunk-sender thread
         with self._state_lock:
             self.sessions.pop(session.session_id, None)
         self._emit("session_closed", session_id=session.session_id, reason=reason)
@@ -437,7 +471,7 @@ class Engine:
     #
     # Every message type is handled directly in this one loop, based
     # purely on session state (session.active_incoming,
-    # session.pending_outgoing_offer) - NOT on which nested function
+    # session.active_outgoing) - NOT on which nested function
     # call we happen to be inside. This matters once bidirectional
     # sending is possible: a single TCP connection genuinely carries
     # two independent logical conversations (my outgoing offer's
@@ -466,10 +500,24 @@ class Engine:
                 self._handle_incoming_done(session, payload)
 
             elif msg_type in (MSG_FILE_ACCEPT, MSG_FILE_REJECT):
-                pending = session.pending_outgoing_offer
-                if pending is not None:
-                    pending.result = (msg_type == MSG_FILE_ACCEPT)
-                    pending.event.set()
+                # Payload IS the transfer_id directly (exactly
+                # TRANSFER_ID_LEN bytes) - same pattern MSG_CANCEL
+                # already uses. Handled directly here, synchronously,
+                # rather than waking up some other thread that's
+                # blocked waiting - nothing blocks on this anymore,
+                # since offering no longer waits for a decision before
+                # moving on to the next queued file.
+                transfer_id = payload
+                transfer = session.active_outgoing.get(transfer_id)
+                if transfer is not None:
+                    accepted = (msg_type == MSG_FILE_ACCEPT)
+                    self._emit("file_offer_answered", session_id=session.session_id,
+                               filename=transfer.filename, accepted=accepted,
+                               transfer_id=transfer_id.hex())
+                    if accepted:
+                        session.accepted_send_queue.put(transfer_id)
+                    else:
+                        session.active_outgoing.pop(transfer_id, None)
 
             elif msg_type == MSG_CANCEL:
                 self._handle_cancel(session, payload)
@@ -488,9 +536,9 @@ class Engine:
         offer_id = next(self._offer_id_counter)
         decision = PendingDecision()
 
-        # Storing filename/filesize here (not just the decision +
-        # session) is what lets get_state_snapshot() fully describe a
-        # pending offer later - "someone wants to send you
+        # Storing filename/filesize/transfer_id here (not just the
+        # decision + session) is what lets get_state_snapshot() fully
+        # describe a pending offer later - "someone wants to send you
         # vacation.jpg, 2MB" - rather than only knowing an offer_id
         # exists with no detail about what it actually is.
         with self._state_lock:
@@ -499,70 +547,105 @@ class Engine:
                 "session": session,
                 "filename": filename,
                 "filesize": filesize,
+                "transfer_id": transfer_id,
             }
 
         self._emit("file_offer_received", session_id=session.session_id,
                    offer_id=offer_id, filename=filename, filesize=filesize,
                    transfer_id=transfer_id.hex())
 
-        # This wait is a DIFFERENT kind of blocking than the old nested
-        # receive loop was: we're waiting on a human decision, not
-        # narrowly refusing to recognize other message types. Chunks
-        # for some OTHER already-active incoming transfer would simply
-        # sit in the OS socket buffer until we get back to recv_message()
-        # - not lost, just delayed, which is fine.
+        # Waiting for the decision happens on its OWN thread, not here
+        # in the reader loop - this is what lets multiple offers all
+        # appear at once, independently decidable: the reader loop
+        # returns immediately to recv_message() and can see/dispatch
+        # FURTHER offers without waiting on this one's decision first.
+        # Each such waiter thread is independent - deciding offer #2
+        # doesn't depend on offer #1's decision having been made yet.
+        threading.Thread(
+            target=self._wait_for_offer_decision,
+            args=(session, offer_id, filename, filesize, transfer_id, decision),
+            daemon=True,
+        ).start()
+
+    def _wait_for_offer_decision(self, session, offer_id, filename, filesize, transfer_id, decision):
         decision.event.wait()
         accept = decision.result
         with self._state_lock:
             self.pending_incoming_offers.pop(offer_id, None)
 
-        self._send(session, MSG_FILE_ACCEPT if accept else MSG_FILE_REJECT, b"")
-        self._emit("file_offer_answered", session_id=session.session_id,
-                   filename=filename, accepted=accept, transfer_id=transfer_id.hex())
-
+        # CRITICAL ORDERING: set up the ability to actually receive
+        # this transfer BEFORE telling the peer they're allowed to
+        # start sending it. Doing this the other way around (send
+        # ACCEPT first, set up active_incoming after) has a genuine
+        # race on a fast/local connection: the peer can receive the
+        # accept and start sending chunks before this side has
+        # finished creating the IncomingTransfer entry, so the first
+        # chunk(s) arrive to find "no matching transfer" and get
+        # silently dropped (correctly harmless for the CANCEL-timing
+        # case elsewhere, but wrong here) - producing a whole-file hash
+        # mismatch with no chunk ever explicitly marked as failed.
+        # Reproduced via repeated test runs, not just theorized.
         if accept:
             safe_filename = sanitize_filename(filename)
             try:
-                session.active_incoming = IncomingTransfer(
+                session.active_incoming[transfer_id] = IncomingTransfer(
                     filename, safe_filename, filesize, transfer_id
                 )
             except OSError as e:
+                # Can't actually receive it (e.g. disk full) - fall
+                # back to rejecting rather than telling the peer
+                # "accepted" and then silently dropping every chunk
+                # they send. This is also a correctness improvement
+                # over the previous ordering, which had this same
+                # problem for this failure case specifically.
                 self._emit("log", message=f"Could not allocate space for incoming file: {e}")
+                accept = False
+
+        try:
+            self._send(session, MSG_FILE_ACCEPT if accept else MSG_FILE_REJECT, transfer_id)
+        except OSError as e:
+            self._emit("log", message=f"Could not send offer response: {e}")
+            return
+
+        self._emit("file_offer_answered", session_id=session.session_id,
+                   filename=filename, accepted=accept, transfer_id=transfer_id.hex())
 
     def _handle_cancel(self, session, transfer_id_bytes):
         """
         The peer sent MSG_CANCEL for a specific transfer_id. Check
         both directions - it might be cancelling something WE are
-        sending (stop our send loop), or telling us THEY won't send us
-        any more of something we're receiving (abort our incoming
-        transfer). At most one of these will actually match, since
-        transfer_id is randomly unique per transfer.
+        sending (stop that transfer's chunk loop), or telling us THEY
+        won't send us any more of something we're receiving (abort our
+        incoming transfer). At most one of these will actually match,
+        since transfer_id is randomly unique per transfer.
         """
-        if session.active_outgoing and session.active_outgoing.transfer_id == transfer_id_bytes:
-            session.active_outgoing.cancel_event.set()
+        outgoing = session.active_outgoing.get(transfer_id_bytes)
+        if outgoing is not None:
+            outgoing.cancel_event.set()
 
-        if session.active_incoming and session.active_incoming.transfer_id == transfer_id_bytes:
-            self._abort_incoming(session, reason="cancelled by peer")
+        if transfer_id_bytes in session.active_incoming:
+            self._abort_incoming(session, transfer_id_bytes, reason="cancelled by peer")
 
-    def _abort_incoming(self, session, reason):
+    def _abort_incoming(self, session, transfer_id, reason):
         """
-        Stop receiving the currently-active incoming transfer early
-        (peer cancelled it, or we're cancelling it ourselves). The
-        partial data stays in staging - same "leave it resumable"
-        philosophy as a chunk failure or dropped connection, just
-        triggered intentionally instead of by an error.
+        Stop receiving a specific incoming transfer early (peer
+        cancelled it, or we're cancelling it ourselves). The partial
+        data stays in staging - same "leave it resumable" philosophy
+        as a chunk failure or dropped connection, just triggered
+        intentionally instead of by an error.
         """
-        transfer = session.active_incoming
+        transfer = session.active_incoming.get(transfer_id)
         if transfer is None:
             return
         if not transfer.output_file.closed:
             transfer.output_file.close()
         self._emit("file_complete", session_id=session.session_id,
                    transfer_id=transfer.transfer_id.hex(), success=False, detail=reason)
-        session.active_incoming = None
+        session.active_incoming.pop(transfer_id, None)
 
     def _handle_incoming_chunk(self, session, payload):
-        transfer = session.active_incoming
+        transfer_id, chunk_index, expected_hash, encrypted_data = unpack_file_chunk(payload)
+        transfer = session.active_incoming.get(transfer_id)
         if transfer is None:
             # Expected and harmless in one common case: we (or the
             # peer) just cancelled this transfer, but a few chunks
@@ -571,8 +654,6 @@ class Engine:
             # just network timing - so this stays quiet rather than
             # looking like something's wrong.
             return
-
-        chunk_index, expected_hash, encrypted_data = unpack_file_chunk(payload)
 
         try:
             chunk_data = session.cipher.decrypt(encrypted_data)
@@ -609,13 +690,13 @@ class Engine:
                    bytes_per_second=bytes_per_second, eta_seconds=eta_seconds)
 
     def _handle_incoming_done(self, session, payload):
-        transfer = session.active_incoming
+        transfer_id, sender_whole_hash = unpack_done(payload)
+        transfer = session.active_incoming.get(transfer_id)
         if transfer is None:
-            self._emit("log", message=f"Received DONE with no active incoming "
+            self._emit("log", message=f"Received DONE with no matching incoming "
                                       f"transfer on session {session.session_id} - ignoring")
             return
 
-        sender_whole_hash = payload
         our_whole_hash = transfer.whole_file_hasher.digest()
         transfer.output_file.close()  # MUST close before any rename (Windows)
 
@@ -634,11 +715,10 @@ class Engine:
         self._emit("file_complete", session_id=session.session_id,
                    transfer_id=transfer.transfer_id.hex(), success=success, detail=detail)
 
-        # Clear the active transfer - this session can now accept a
-        # new incoming FILE_OFFER (or already has, if one arrived
-        # while this one was finishing - it'll be queued behind this
-        # call in the reader loop's next iteration).
-        session.active_incoming = None
+        # Clear THIS transfer only - other accepted-but-still-pending
+        # or actively-receiving transfers on this same session (if
+        # any) are unaffected.
+        session.active_incoming.pop(transfer_id, None)
 
     # ---------- COMMANDS ----------
 
@@ -759,16 +839,20 @@ class Engine:
     def _sender_loop(self, session):
         """
         Runs for the lifetime of the session: pulls filepaths off
-        send_queue one at a time and sends each fully (offer, wait for
-        accept/reject, chunks if accepted) before moving to the next.
-        A None sentinel signals this loop to stop (used on cleanup).
+        send_queue and fires an OFFER for each one immediately - NOT
+        waiting for a decision before moving to the next. This is what
+        lets several queued files' offers all appear at once,
+        independently decidable, rather than strictly one at a time.
+        Actual byte-transfer for ACCEPTED files happens separately,
+        sequentially, via _chunk_sender_loop below. A None sentinel
+        signals this loop to stop (used on cleanup).
         """
         while True:
             filepath = session.send_queue.get()
             if filepath is None:
                 return
             try:
-                self._send_one_file(session, filepath)
+                self._offer_file(session, filepath)
             except (ConnectionError, OSError) as e:
                 self._emit("log", message=f"Send failed on session {session.session_id}: {e}")
                 return
@@ -779,18 +863,26 @@ class Engine:
             self._emit("log", message=f"Cannot send: session {session_id} not ready")
             return
 
-        # Just enqueue - the session's dedicated sender thread (started
+        # Just enqueue - the session's dedicated offer thread (started
         # once, when the session's handshake succeeded) will process
-        # this in order, one file at a time. Calling send_file()
-        # several times quickly is safe and simply queues them up,
-        # rather than racing multiple sends against each other.
+        # this in order. Calling send_file() several times quickly is
+        # safe - each gets its own offer sent promptly, independently
+        # decidable, rather than racing or blocking on each other.
         session.send_queue.put(filepath)
 
-    def _send_one_file(self, session, filepath):
+    def _offer_file(self, session, filepath):
+        """
+        Sends a FILE_OFFER and returns immediately - does NOT wait for
+        a decision. The actual decision, when it arrives, is handled
+        directly in the reader loop's dispatch (see the
+        MSG_FILE_ACCEPT/MSG_FILE_REJECT branch above), which enqueues
+        accepted transfers onto accepted_send_queue for
+        _chunk_sender_loop to actually process.
+        """
         # This is a LOCAL file access problem (bad path, permissions,
         # file deleted before we got to it) - fundamentally different
         # from a network/connection problem, and must be handled
-        # differently: report it clearly and return, so the sender
+        # differently: report it clearly and return, so the offer
         # loop (see _sender_loop) moves on to the NEXT queued file.
         # Previously this wasn't guarded at all, so an OSError here
         # (e.g. a bad path) propagated all the way up to _sender_loop's
@@ -806,42 +898,55 @@ class Engine:
             return
 
         transfer_id = os.urandom(TRANSFER_ID_LEN)
-
-        transfer = OutgoingTransfer(filename, filesize, transfer_id)
-        session.active_outgoing = transfer
-
-        decision = PendingDecision()
-        session.pending_outgoing_offer = decision
+        transfer = OutgoingTransfer(filename, filesize, transfer_id, filepath)
+        session.active_outgoing[transfer_id] = transfer
 
         offer_payload = pack_file_offer(filename, filesize, transfer_id)
         self._send(session, MSG_FILE_OFFER, offer_payload)
         self._emit("log", message=f"Offered '{filename}' on session {session.session_id}")
 
-        decision.event.wait()
-        session.pending_outgoing_offer = None
+    def _chunk_sender_loop(self, session):
+        """
+        Runs for the lifetime of the session: pulls ACCEPTED
+        transfer_ids off accepted_send_queue and actually sends each
+        one's chunks, one at a time, start to finish, before moving to
+        the next - this is what keeps real byte-transfer sequential
+        even though multiple offers can be decided independently and
+        close together. A None sentinel signals this loop to stop.
+        """
+        while True:
+            transfer_id = session.accepted_send_queue.get()
+            if transfer_id is None:
+                return
+            try:
+                self._send_chunks_for_transfer(session, transfer_id)
+            except (ConnectionError, OSError) as e:
+                self._emit("log", message=f"Chunk-sending failed on session "
+                                          f"{session.session_id}: {e}")
+                return
 
-        if not decision.result:
-            self._emit("file_offer_answered", session_id=session.session_id,
-                       filename=filename, accepted=False, transfer_id=transfer_id.hex())
-            session.active_outgoing = None
-            return
+    def _send_chunks_for_transfer(self, session, transfer_id):
+        transfer = session.active_outgoing.get(transfer_id)
+        if transfer is None:
+            return  # shouldn't normally happen, but nothing to do if it does
 
-        self._emit("file_offer_answered", session_id=session.session_id,
-                   filename=filename, accepted=True, transfer_id=transfer_id.hex())
+        filepath = transfer.filepath
+        filename = transfer.filename
+        filesize = transfer.filesize
 
         whole_file_hasher = hashlib.sha256()
         chunk_index = 0
         cancelled = False
 
-        # This is guarded the same way as the initial filename/filesize
-        # lookup above, for the same reason: the file could become
-        # unreadable AFTER the offer was already accepted (deleted,
-        # a USB drive pulled mid-read, etc.), and without this guard
-        # that failure would propagate all the way up to
-        # _sender_loop's except clause, silently killing the
-        # session's ability to send anything else for the rest of its
-        # lifetime - exactly the same bug as the initial lookup, just
-        # triggered partway through instead of at the very start.
+        # This is guarded the same way file access was guarded at
+        # offer time, for the same reason: the file could become
+        # unreadable AFTER being accepted (deleted, a USB drive pulled
+        # mid-read, etc.), and without this guard that failure would
+        # propagate all the way up to _chunk_sender_loop's except
+        # clause - which is designed to end the loop for a genuinely
+        # dead CONNECTION, but was doing the same thing for a local
+        # file error, silently killing this session's ability to send
+        # anything else for the rest of its lifetime.
         #
         # We don't need to distinguish "local file problem" from "the
         # connection itself died" here - the READER thread independently
@@ -868,7 +973,7 @@ class Engine:
                     chunk_hash = hashlib.sha256(chunk).digest()
                     encrypted_chunk = session.cipher.encrypt(chunk)
 
-                    chunk_payload = pack_file_chunk(chunk_index, chunk_hash, encrypted_chunk)
+                    chunk_payload = pack_file_chunk(transfer_id, chunk_index, chunk_hash, encrypted_chunk)
                     self._send(session, MSG_FILE_CHUNK, chunk_payload)
 
                     transfer.bytes_sent += len(chunk)
@@ -890,7 +995,7 @@ class Engine:
                 pass  # connection's probably dead too - the reader thread will notice
             self._emit("file_complete", session_id=session.session_id,
                        transfer_id=transfer_id.hex(), success=False, detail=str(e))
-            session.active_outgoing = None
+            session.active_outgoing.pop(transfer_id, None)
             return
 
         if cancelled:
@@ -899,11 +1004,11 @@ class Engine:
                        transfer_id=transfer_id.hex(), success=False, detail="cancelled")
         else:
             final_hash = whole_file_hasher.digest()
-            self._send(session, MSG_DONE, final_hash)
+            self._send(session, MSG_DONE, pack_done(transfer_id, final_hash))
             self._emit("file_complete", session_id=session.session_id,
                        transfer_id=transfer_id.hex(), success=True, detail="sent")
 
-        session.active_outgoing = None
+        session.active_outgoing.pop(transfer_id, None)
 
     def cancel_transfer(self, session_id, transfer_id_hex):
         """
@@ -926,16 +1031,17 @@ class Engine:
             self._emit("log", message=f"Invalid transfer_id for cancel: {transfer_id_hex}")
             return
 
-        if session.active_outgoing and session.active_outgoing.transfer_id == transfer_id:
-            session.active_outgoing.cancel_event.set()
+        outgoing = session.active_outgoing.get(transfer_id)
+        if outgoing is not None:
+            outgoing.cancel_event.set()
             return
 
-        if session.active_incoming and session.active_incoming.transfer_id == transfer_id:
+        if transfer_id in session.active_incoming:
             try:
                 self._send(session, MSG_CANCEL, transfer_id)
             except OSError:
                 pass
-            self._abort_incoming(session, reason="cancelled locally")
+            self._abort_incoming(session, transfer_id, reason="cancelled locally")
             return
 
         self._emit("log", message=f"No active transfer {transfer_id_hex} "
@@ -980,6 +1086,11 @@ class Engine:
         """
         Build a full, JSON-serializable description of ONE session -
         the per-session piece of get_state_snapshot() below.
+
+        active_incoming/active_outgoing are LISTS now, not a single
+        dict-or-null - a session can have multiple offers accepted (or
+        pending decision) close together, even though only one
+        transfer's chunks are ever actually flowing at once.
         """
         info = {
             "session_id": session.session_id,
@@ -987,23 +1098,21 @@ class Engine:
             "direction": session.direction,
             "peer_name": session.peer_name,
             "handshake_complete": session.cipher is not None,
-            "active_incoming": None,
-            "active_outgoing": None,
+            "active_incoming": [
+                self._transfer_progress_dict(
+                    t, t.start_time, t.bytes_processed,
+                    "chunks_failed", len(t.failed_chunk_indices),
+                )
+                for t in session.active_incoming.values()
+            ],
+            "active_outgoing": [
+                self._transfer_progress_dict(
+                    t, t.start_time, t.bytes_sent,
+                    "cancelled", t.cancel_event.is_set(),
+                )
+                for t in session.active_outgoing.values()
+            ],
         }
-
-        incoming = session.active_incoming
-        if incoming is not None:
-            info["active_incoming"] = self._transfer_progress_dict(
-                incoming, incoming.start_time, incoming.bytes_processed,
-                "chunks_failed", len(incoming.failed_chunk_indices),
-            )
-
-        outgoing = session.active_outgoing
-        if outgoing is not None:
-            info["active_outgoing"] = self._transfer_progress_dict(
-                outgoing, outgoing.start_time, outgoing.bytes_sent,
-                "cancelled", outgoing.cancel_event.is_set(),
-            )
 
         return info
 
@@ -1042,6 +1151,7 @@ class Engine:
                 "session_id": entry["session"].session_id,
                 "filename": entry["filename"],
                 "filesize": entry["filesize"],
+                "transfer_id": entry["transfer_id"].hex(),
             }
             for offer_id, entry in offer_items
         ]
@@ -1067,7 +1177,7 @@ class Engine:
         preventing data loss that wouldn't otherwise happen.
         """
         return any(
-            session.active_incoming is not None or session.active_outgoing is not None
+            len(session.active_incoming) > 0 or len(session.active_outgoing) > 0
             for session in self.sessions.values()
         )
 
@@ -1092,6 +1202,16 @@ class Engine:
                 continue  # the stop-sentinel, not a real queued file
             self._emit("log", message=f"Cancelled queued send (session "
                                       f"{session.session_id} closing): {dropped_filepath}")
+
+        while True:
+            try:
+                dropped_transfer_id = session.accepted_send_queue.get_nowait()
+            except queue.Empty:
+                break
+            if dropped_transfer_id is None:
+                continue  # the stop-sentinel
+            self._emit("log", message=f"Cancelled accepted-but-not-yet-started "
+                                      f"transfer (session {session.session_id} closing)")
 
         try:
             self._send(session, MSG_BYE, b"")

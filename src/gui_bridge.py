@@ -33,6 +33,7 @@ import contacts as contacts_module
 import history as history_module
 import my_identity
 import network_info
+import storage
 
 
 class Bridge:
@@ -223,3 +224,34 @@ class Bridge:
 
     def open_port_check_tool(self):
         network_info.open_port_check_tool()
+
+    def get_save_dir(self):
+        return storage.get_save_dir()
+
+    def open_save_folder(self):
+        storage.open_save_dir_in_explorer()
+
+    def pick_save_folder(self):
+        """
+        Opens the native OS folder picker and, if something was
+        chosen, sets it as the new save location immediately. Returns
+        {"success": True, "path": ...} on success, or
+        {"success": False, "error": ...} if the chosen folder isn't
+        usable (e.g. no write permission) - {"success": False,
+        "error": None} specifically means the person just cancelled,
+        not a real error.
+        """
+        if self._window is None:
+            return {"success": False, "error": "No window available"}
+
+        import webview
+        result = self._window.create_file_dialog(webview.FOLDER_DIALOG)
+        if not result:
+            return {"success": False, "error": None}
+
+        chosen = result[0]
+        try:
+            storage.set_save_dir(chosen)
+            return {"success": True, "path": chosen}
+        except OSError as e:
+            return {"success": False, "error": str(e)}

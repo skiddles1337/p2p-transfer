@@ -25,18 +25,29 @@ MSG_FILE_OFFER = 2  # payload: filesize (8) + transfer_id (16) + filename
 # (3 was MSG_FILE_DATA, an early whole-file-in-one-message design,
 # fully replaced by chunking below - removed as dead code, left as a
 # gap rather than renumbering everything else after it)
-MSG_FILE_CHUNK = 4  # payload: chunk index (4 bytes) + chunk hash (32 bytes)
-                     # + chunk data (remaining bytes, ENCRYPTED)
-MSG_DONE = 5        # payload: SHA-256 hash of the ENTIRE (plaintext) file -
-                     # sent once, after all chunks, to signal "that's
-                     # everything" and let the receiver do a final check
+MSG_FILE_CHUNK = 4  # payload: transfer_id (16) + chunk index (4) +
+                     # chunk hash (32) + chunk data (remaining, ENCRYPTED).
+                     # transfer_id added when multiple offers/transfers
+                     # became possible per session at once - with only
+                     # ever one active transfer per session (the
+                     # original design), there was nothing to
+                     # disambiguate; now there can be several pending
+                     # at once, even though actual chunk-sending stays
+                     # sequential (see engine.py's session-level design).
+MSG_DONE = 5        # payload: transfer_id (16) + SHA-256 hash of the
+                     # ENTIRE (plaintext) file - sent once, after all
+                     # chunks, to signal "that's everything" and let
+                     # the receiver do a final check
 MSG_HELLO_RESPONSE = 6  # payload: sender's X25519 public key (32 bytes)
                          # + confirmation tag (32 bytes) = 64 bytes total
 MSG_HELLO_OK = 7        # payload: listener's confirmation tag (32 bytes)
 MSG_HELLO_REJECT = 8    # payload: empty - handshake failed, connection
                          # will close right after this is sent
-MSG_FILE_ACCEPT = 9     # payload: empty - receiver agreed to this FILE_OFFER
-MSG_FILE_REJECT = 10    # payload: empty - receiver declined this FILE_OFFER
+MSG_FILE_ACCEPT = 9     # payload: transfer_id (16) - receiver agreed to
+                         # this specific FILE_OFFER (see MSG_FILE_CHUNK's
+                         # note on why transfer_id is now included)
+MSG_FILE_REJECT = 10    # payload: transfer_id (16) - receiver declined
+                         # this specific FILE_OFFER
 MSG_BYE = 11            # payload: empty - sender signals no more files,
                          # session is ending
 MSG_CANCEL = 12         # payload: transfer_id (16 bytes) - either side can
@@ -181,13 +192,20 @@ def unpack_file_offer(payload: bytes) -> tuple[str, int, bytes]:
     return filename, filesize, transfer_id
 
 
-def pack_file_chunk(chunk_index: int, chunk_hash: bytes, chunk_data: bytes) -> bytes:
+def pack_file_chunk(transfer_id: bytes, chunk_index: int, chunk_hash: bytes, chunk_data: bytes) -> bytes:
     """
     Build the payload for a FILE_CHUNK message:
 
+        [ 16 bytes : transfer_id ]
         [ 4 bytes  : chunk index ]
         [ 32 bytes : chunk_hash (caller-provided) ]
         [ remaining bytes : chunk_data itself ]
+
+    transfer_id lets a session correctly route this chunk to the right
+    transfer even when more than one has been accepted at once (only
+    one is ever actually mid-transfer at a time, but the receiver still
+    needs to know unambiguously which one this chunk belongs to, rather
+    than assuming "whichever one is currently active").
 
     The index lets both sides refer to "chunk #7" unambiguously (useful
     later for requesting a specific chunk be resent).
@@ -201,25 +219,49 @@ def pack_file_chunk(chunk_index: int, chunk_hash: bytes, chunk_data: bytes) -> b
     one the caller happened to pass in - separating the two makes the
     caller's intent explicit rather than implicit.
     """
+    if len(transfer_id) != TRANSFER_ID_LEN:
+        raise ValueError(f"transfer_id must be {TRANSFER_ID_LEN} bytes")
     index_bytes = struct.pack(CHUNK_INDEX_FORMAT, chunk_index)
-    return index_bytes + chunk_hash + chunk_data
+    return transfer_id + index_bytes + chunk_hash + chunk_data
 
 
-def unpack_file_chunk(payload: bytes) -> tuple[int, bytes, bytes]:
+def unpack_file_chunk(payload: bytes) -> tuple[bytes, int, bytes, bytes]:
     """
-    Given a FILE_CHUNK payload, return (chunk_index, chunk_hash, chunk_data).
+    Given a FILE_CHUNK payload, return
+    (transfer_id, chunk_index, chunk_hash, chunk_data).
 
     Note: this does NOT verify the hash - it just splits the payload
-    into its three parts. Verifying is the caller's job (compare
-    chunk_hash against hashlib.sha256(chunk_data).digest()).
+    into its parts. Verifying is the caller's job (compare chunk_hash
+    against hashlib.sha256(chunk_data).digest()).
     """
-    index_bytes = payload[:CHUNK_INDEX_LEN]
-    hash_bytes = payload[CHUNK_INDEX_LEN:CHUNK_INDEX_LEN + CHUNK_HASH_LEN]
-    chunk_data = payload[CHUNK_INDEX_LEN + CHUNK_HASH_LEN:]
+    transfer_id = payload[:TRANSFER_ID_LEN]
+    index_bytes = payload[TRANSFER_ID_LEN:TRANSFER_ID_LEN + CHUNK_INDEX_LEN]
+    hash_start = TRANSFER_ID_LEN + CHUNK_INDEX_LEN
+    hash_bytes = payload[hash_start:hash_start + CHUNK_HASH_LEN]
+    chunk_data = payload[hash_start + CHUNK_HASH_LEN:]
 
     (chunk_index,) = struct.unpack(CHUNK_INDEX_FORMAT, index_bytes)
 
-    return chunk_index, hash_bytes, chunk_data
+    return transfer_id, chunk_index, hash_bytes, chunk_data
+
+
+def pack_done(transfer_id: bytes, whole_file_hash: bytes) -> bytes:
+    """
+    Build the payload for a DONE message:
+
+        [ 16 bytes : transfer_id ]
+        [ 32 bytes : SHA-256 hash of the entire plaintext file ]
+    """
+    if len(transfer_id) != TRANSFER_ID_LEN:
+        raise ValueError(f"transfer_id must be {TRANSFER_ID_LEN} bytes")
+    return transfer_id + whole_file_hash
+
+
+def unpack_done(payload: bytes) -> tuple[bytes, bytes]:
+    """Given a DONE payload, return (transfer_id, whole_file_hash)."""
+    transfer_id = payload[:TRANSFER_ID_LEN]
+    whole_file_hash = payload[TRANSFER_ID_LEN:TRANSFER_ID_LEN + CHUNK_HASH_LEN]
+    return transfer_id, whole_file_hash
 
 
 def pack_hello_response(sender_public_key_bytes: bytes, tag: bytes) -> bytes:

@@ -215,6 +215,12 @@
 
     .section-header-row h2 { margin-bottom: 18px; }
 
+    .header-actions {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+
     .section-header-row .link-btn {
       border: 1px solid var(--border);
       border-radius: 2px;
@@ -248,6 +254,11 @@
 
     .finished-summary .conn-card-header { margin-bottom: 8px; }
     .finished-summary .chunk-grid { margin-bottom: 0; }
+
+    .rejected-summary {
+      border-color: var(--danger);
+      background: rgba(196, 98, 107, 0.08);
+    }
 
     .empty-note {
       color: var(--text-dim);
@@ -528,7 +539,11 @@
     <div class="section active" id="section-connections">
       <div class="section-header-row">
         <h2>Connections</h2>
-        <button class="link-btn danger" onclick="closeAllConnections()">close all</button>
+        <div class="header-actions">
+          <button class="link-btn" onclick="openDownloadsFolder()" title="Open downloads folder">📂 downloads</button>
+          <button class="link-btn" onclick="changeSaveFolder()" title="Change download location">⚙</button>
+          <button class="link-btn danger" onclick="closeAllConnections()">close all</button>
+        </div>
       </div>
       <div id="connectionsListDiv"><p class="empty-note">No active connections.</p></div>
 
@@ -591,6 +606,11 @@ let pendingOffers = {};
 // assign "incoming" vs "outgoing" direction when file_offer_answered
 // arrives, since that event fires on BOTH sides of every offer.
 let offersWeReceived = new Set();
+
+// transferKey(session_id, transfer_id) -> {filename, sessionId} - for
+// offers WE declined, shown as a persistent, dismissible red summary
+// (see buildRejectedSummary) until manually dismissed.
+let rejectedOffers = {};
 
 // ---------- Real connection cards + live chunk grid state ----------
 // sessionCards: session_id -> {peerAddr, peerName, handshakeState, currentTransferId}
@@ -656,6 +676,7 @@ function handleConnectionCardEvent(event) {
     sessionCards[event.session_id] = {
       peerAddr: event.peer_addr, peerName: null,
       handshakeState: "pending", currentTransferId: null,
+      lastRejectedKey: null,
     };
     renderConnections();
 
@@ -690,14 +711,24 @@ function handleConnectionCardEvent(event) {
     renderConnections();
 
   } else if (event.type === "file_offer_answered") {
+    const key = transferKey(event.session_id, event.transfer_id);
     if (event.accepted) {
-      const key = transferKey(event.session_id, event.transfer_id);
       // This event fires on BOTH sides of every offer - use whether
       // WE were the one who received it to correctly tell "outgoing"
       // (we sent this file) apart from "incoming" (we're about to
       // receive it), rather than assuming one or the other.
       const direction = offersWeReceived.has(key) ? "incoming" : "outgoing";
       ensureTransferMeta(key, event.session_id, event.transfer_id, event.filename, direction);
+      renderConnections();
+    } else if (offersWeReceived.has(key)) {
+      // WE were the one who declined this - show a persistent,
+      // dismissible red summary. (If instead OUR OWN offer got
+      // rejected by someone else, offersWeReceived won't have this
+      // key, and we deliberately don't show a special card for that
+      // here - the send form simply becomes available again.)
+      rejectedOffers[key] = { filename: event.filename, sessionId: event.session_id };
+      const card = sessionCards[event.session_id];
+      if (card) card.lastRejectedKey = key;
       renderConnections();
     }
 
@@ -796,25 +827,37 @@ function buildConnectionCard(sessionId) {
   el.appendChild(header);
 
   if (card.handshakeState === "ok") {
-    const pendingOffer = findPendingOfferForSession(sessionId);
+    const pendingOffersForSession = findPendingOffersForSession(sessionId);
     const key = card.currentTransferId ? transferKey(sessionId, card.currentTransferId) : null;
     const meta = key ? transferMeta[key] : null;
 
-    if (pendingOffer) {
-      el.appendChild(buildOfferPrompt(pendingOffer));
-    } else if (meta && !meta.finished) {
-      el.appendChild(buildTransferView(sessionId, card.currentTransferId));
-    } else {
-      // Either no transfer has happened yet on this card, or the most
-      // recent one already finished - either way, a fresh send form
-      // needs to be available, not permanently blocked by whatever
-      // the last transfer was. A finished transfer's summary is
-      // PERSISTENT here - it stays until manually dismissed (or until
-      // a new transfer replaces it), not auto-cleared.
-      if (meta && meta.finished) {
-        el.appendChild(buildFinishedSummary(sessionId, card.currentTransferId));
+    // Every pending offer for this session gets its own independent
+    // accept/decline prompt, all shown at once - not just the first
+    // one found, and not waiting for an earlier one to be decided.
+    pendingOffersForSession.forEach(offer => {
+      el.appendChild(buildOfferPrompt(offer));
+    });
+
+    if (pendingOffersForSession.length === 0) {
+      if (meta && !meta.finished) {
+        el.appendChild(buildTransferView(sessionId, card.currentTransferId));
+      } else {
+        // Either no transfer has happened yet on this card, or the
+        // most recent one already finished - either way, a fresh
+        // send form needs to be available, not permanently blocked
+        // by whatever came before. A finished transfer's summary,
+        // and/or a rejected offer's summary, are PERSISTENT here -
+        // they stay until manually dismissed, not auto-cleared - and
+        // can both be present at once if that's genuinely what
+        // happened most recently on this card.
+        if (meta && meta.finished) {
+          el.appendChild(buildFinishedSummary(sessionId, card.currentTransferId));
+        }
+        if (card.lastRejectedKey && rejectedOffers[card.lastRejectedKey]) {
+          el.appendChild(buildRejectedSummary(sessionId, card.lastRejectedKey));
+        }
+        el.appendChild(buildSendForm(sessionId));
       }
-      el.appendChild(buildSendForm(sessionId));
     }
   }
 
@@ -863,9 +906,40 @@ function buildFinishedSummary(sessionId, transferId) {
   return wrapper;
 }
 
+function buildRejectedSummary(sessionId, key) {
+  const info = rejectedOffers[key];
+  const wrapper = document.createElement("div");
+  wrapper.className = "finished-summary rejected-summary";
 
-function findPendingOfferForSession(sessionId) {
-  return Object.values(pendingOffers).find(o => o.session_id === parseInt(sessionId));
+  const labelRow = document.createElement("div");
+  labelRow.className = "conn-card-header";
+
+  const label = document.createElement("span");
+  label.className = "transfer-label";
+  label.style.marginBottom = "0";
+  label.textContent = `Rejected: ${info.filename}`;
+
+  const dismissBtn = document.createElement("button");
+  dismissBtn.className = "close";
+  dismissBtn.innerHTML = "&times;";
+  dismissBtn.title = "Dismiss";
+  dismissBtn.onclick = () => {
+    delete rejectedOffers[key];
+    const card = sessionCards[sessionId];
+    if (card && card.lastRejectedKey === key) card.lastRejectedKey = null;
+    renderConnections();
+  };
+
+  labelRow.appendChild(label);
+  labelRow.appendChild(dismissBtn);
+  wrapper.appendChild(labelRow);
+
+  return wrapper;
+}
+
+
+function findPendingOffersForSession(sessionId) {
+  return Object.values(pendingOffers).filter(o => o.session_id === parseInt(sessionId));
 }
 
 function buildOfferPrompt(offer) {
@@ -1313,6 +1387,22 @@ function closeAllConnections() {
   if (sessionIds.length === 0) return;
   if (!confirm(`Close all ${sessionIds.length} active connection(s)? Any in-progress transfers will be interrupted.`)) return;
   sessionIds.forEach(sid => window.pywebview.api.close_session(parseInt(sid)));
+}
+
+function openDownloadsFolder() {
+  window.pywebview.api.open_save_folder();
+}
+
+function changeSaveFolder() {
+  window.pywebview.api.pick_save_folder().then(result => {
+    if (result.success) {
+      alert("Save location updated to:\n" + result.path);
+    } else if (result.error) {
+      alert("Couldn't use that folder: " + result.error);
+    }
+    // result.error === null means the person just cancelled - no
+    // message needed for that case.
+  });
 }
 
 function loadIdentity() {
