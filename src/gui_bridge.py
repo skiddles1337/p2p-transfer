@@ -48,6 +48,13 @@ class Bridge:
         self._push = push_to_frontend
         self._stop_flag = threading.Event()
 
+        # Set via set_window() once the real pywebview window exists -
+        # needed for pick_files() below, which calls a method on the
+        # window object itself (create_file_dialog isn't part of the
+        # engine/pairing layer, it's pywebview-specific, so it lives
+        # here rather than being exposed as a plain command elsewhere).
+        self._window = None
+
         # Without this, a fresh Engine() has no memory of previously-
         # paired contacts - see pairing.load_contacts_into_engine's
         # docstring for the real bug this prevents.
@@ -81,6 +88,34 @@ class Bridge:
 
     def stop(self) -> None:
         self._stop_flag.set()
+
+    def set_window(self, window) -> None:
+        """Called once from gui_app.py right after the real pywebview
+        window is created - see __init__'s note on why this can't be
+        passed in at construction time (the window doesn't exist yet
+        when the Bridge is created)."""
+        self._window = window
+
+    def pick_files(self):
+        """
+        Opens the NATIVE OS file picker (not a browser <input
+        type=file>, which can't return real filesystem paths) and
+        returns the chosen path(s) as a list - empty if the person
+        cancelled. This is the reliable way to get a real path to pass
+        to send_file(), unlike drag-and-drop (see index.html's own
+        notes on why that's uncertain across environments).
+
+        Imports pywebview locally rather than at module level -
+        pick_files() is the only thing in this whole module that
+        actually needs it (everything else is pure engine/pairing
+        logic), so the rest of the bridge stays importable and
+        testable even in an environment without pywebview installed.
+        """
+        if self._window is None:
+            return []
+        import webview
+        paths = self._window.create_file_dialog(webview.OPEN_DIALOG, allow_multiple=True)
+        return list(paths) if paths else []
 
     # ---------- Engine commands ----------
 

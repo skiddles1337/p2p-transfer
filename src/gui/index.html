@@ -256,6 +256,17 @@
     .conn-card.active { border-left: 2px solid var(--accent); }
     .conn-card.pending { opacity: 0.7; }
     .conn-card.rejected { border-left: 2px solid var(--danger); opacity: 0.7; }
+    .conn-card.drag-over {
+      border: 1px dashed var(--accent);
+      background: rgba(79, 195, 176, 0.06);
+    }
+
+    .drop-hint {
+      font-size: 11px;
+      color: var(--text-dim);
+      font-family: 'IBM Plex Mono', monospace;
+      margin-top: 6px;
+    }
 
     .conn-card-header {
       display: flex;
@@ -474,7 +485,7 @@
         </span>
         <button class="link-btn" onclick="refreshIp()">refresh</button>
         <span class="spacer"></span>
-        <button class="link-btn" onclick="testPort()">test port</button>
+        <button class="link-btn" id="testPortBtn" onclick="testPort()">test port</button>
       </label>
       <div class="ip-port-row">
         <input class="ip" id="myIp" readonly onblur="onIpBlur()">
@@ -779,9 +790,53 @@ function buildConnectionCard(sessionId) {
     } else {
       el.appendChild(buildSendForm(sessionId));
     }
+
+    attachDropHandlers(el, sessionId);
   }
 
   return el;
+}
+
+function attachDropHandlers(el, sessionId) {
+  // Attached to the WHOLE card regardless of what it's currently
+  // showing (idle send form, an active transfer, or an offer prompt) -
+  // send_file() already queues naturally, so dropping mid-transfer is
+  // fine, same as clicking "send" again would be.
+  //
+  // IMPORTANT CAVEAT: dropped_file.path is a non-standard property -
+  // standard web security deliberately does not expose real
+  // filesystem paths from drag-and-drop (same restriction as a
+  // browser <input type=file>). Some embedded-browser environments
+  // expose it anyway as an extension; whether pywebview's WebView2
+  // backend does is NOT confirmed and needs real-machine testing -
+  // this is genuinely uncertain, unlike everything else in this file.
+  // The "browse..." button (pick_files(), a real native OS dialog) is
+  // the GUARANTEED-working alternative regardless of how this turns out.
+  el.addEventListener("dragover", (e) => {
+    e.preventDefault();
+    el.classList.add("drag-over");
+  });
+
+  el.addEventListener("dragleave", () => {
+    el.classList.remove("drag-over");
+  });
+
+  el.addEventListener("drop", (e) => {
+    e.preventDefault();
+    el.classList.remove("drag-over");
+
+    const files = Array.from(e.dataTransfer.files);
+    const missingPath = files.some(f => !f.path);
+
+    if (missingPath || files.length === 0) {
+      alert("Couldn't get a real file path from the drop - try the "
+          + "'browse...' button instead (this environment may not "
+          + "support drag-and-drop file paths).");
+      return;
+    }
+
+    files.forEach(f => window.pywebview.api.send_file(parseInt(sessionId), f.path));
+  });
 }
 
 function findPendingOfferForSession(sessionId) {
@@ -923,7 +978,9 @@ function renderChunkGrid(key) {
 
 function buildSendForm(sessionId) {
   const wrapper = document.createElement("div");
-  wrapper.className = "inline-row";
+
+  const row = document.createElement("div");
+  row.className = "inline-row";
 
   const pathInput = document.createElement("input");
   pathInput.placeholder = "file path";
@@ -934,8 +991,29 @@ function buildSendForm(sessionId) {
   sendBtn.textContent = "send";
   sendBtn.onclick = () => window.pywebview.api.send_file(parseInt(sessionId), pathInput.value);
 
-  wrapper.appendChild(pathInput);
-  wrapper.appendChild(sendBtn);
+  const browseBtn = document.createElement("button");
+  browseBtn.className = "link-btn";
+  browseBtn.textContent = "browse...";
+  browseBtn.onclick = () => {
+    // Native OS file picker - returns REAL filesystem paths, unlike a
+    // browser <input type=file>, which deliberately can't. Sends
+    // every selected file immediately rather than just filling the
+    // path box, so picking several files queues them all in one go.
+    window.pywebview.api.pick_files().then(paths => {
+      paths.forEach(p => window.pywebview.api.send_file(parseInt(sessionId), p));
+    });
+  };
+
+  row.appendChild(pathInput);
+  row.appendChild(sendBtn);
+  row.appendChild(browseBtn);
+  wrapper.appendChild(row);
+
+  const hint = document.createElement("div");
+  hint.className = "drop-hint";
+  hint.textContent = "or drag a file onto this card";
+  wrapper.appendChild(hint);
+
   return wrapper;
 }
 
@@ -1097,9 +1175,30 @@ function refreshIp() {
 }
 
 function testPort() {
-  // Deliberately manual/browser-based, not automated - see
-  // network_info.open_port_check_tool()'s own docstring for why.
-  window.pywebview.api.open_port_check_tool();
+  window.pywebview.api.get_state_snapshot().then(snapshot => {
+    // Prefer the REAL listening port (source of truth) over whatever
+    // the field currently shows - these can drift apart if the field
+    // was edited without restarting the listener (see the field's
+    // own design notes). Fall back to the field's value if not
+    // currently listening at all, so this is still useful before
+    // you've started.
+    const port = snapshot.listening ? snapshot.listening_port
+                                     : document.getElementById("myPort").value;
+
+    navigator.clipboard.writeText(String(port)).then(() => {
+      const btn = document.getElementById("testPortBtn");
+      const original = btn.textContent;
+      btn.textContent = "copied!";
+      setTimeout(() => { btn.textContent = original; }, 1500);
+    }).catch(() => {
+      // Clipboard write failing isn't fatal here either - the person
+      // can still see/type the port manually on the external site.
+    });
+
+    // Deliberately manual/browser-based, not automated - see
+    // network_info.open_port_check_tool()'s own docstring for why.
+    window.pywebview.api.open_port_check_tool();
+  });
 }
 
 function doQuickShare() {

@@ -600,6 +600,20 @@ rebuild the reasoning from scratch mid-debugging.
   supports this without changes.
 - No peer folder browsing/requesting — a bigger feature needing its
   own permission model.
+- **Folder drag-and-drop is deliberately deferred** — dropping a
+  folder onto a connection card should eventually prompt "zip this
+  folder first, or send its contents as individual files?" but isn't
+  built yet. Single-file drag-and-drop IS implemented, with a real
+  caveat: it relies on a dropped file's `.path` property, which
+  standard web security does not guarantee is populated (this is
+  usually blocked for the same reason a browser `<input type=file>`
+  can't return a real path) — whether pywebview's WebView2 backend
+  exposes it is genuinely unconfirmed and needs real-machine testing,
+  unlike everything else in this codebase. The native OS file picker
+  (`Bridge.pick_files()`, via `pywebview`'s `create_file_dialog`) is
+  the guaranteed-working alternative regardless of how drag-and-drop
+  turns out, and sends every selected file immediately rather than
+  just filling a path field.
 - `cli.py` does not yet expose several engine/pairing capabilities
   that exist and are tested: `cancel_transfer`, `get_state_snapshot`,
   `quick_share`/`paste_and_connect`, `rename_contact`/`set_alias`, and

@@ -61,6 +61,7 @@ def main():
         height=800,
     )
     window_holder["window"] = window
+    bridge.set_window(window)
 
     # debug=True opens dev tools automatically (or makes them
     # available via right-click) - genuinely useful right now, since
