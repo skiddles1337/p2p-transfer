@@ -66,8 +66,31 @@ def print_events(engine: Engine) -> None:
 
         elif etype == "chunk_progress":
             shown_index = event["chunk_index"] + 1  # 1-based for display
+
+            rate = event.get("bytes_per_second")
+            eta = event.get("eta_seconds")
+
+            # Rate/ETA are None for the very first chunk or two (not
+            # enough elapsed time yet to estimate meaningfully) - show
+            # what we can, rather than a confusing blank or a crash.
+            if rate is not None:
+                rate_str = f"{rate / 1_000_000:.2f} MB/s"
+            else:
+                rate_str = "calculating..."
+
+            if eta is not None:
+                eta_str = f"{eta:.0f}s remaining"
+            else:
+                eta_str = ""
+
+            done = event.get("bytes_transferred", 0)
+            total = event.get("total_bytes", 0)
+            percent = (done / total * 100) if total else 0
+
             print(f"[session {event['session_id']}] chunk {shown_index}/"
-                  f"{event['total_chunks']} - {event['status']}")
+                  f"{event['total_chunks']} - {event['status']} "
+                  f"({percent:.0f}%, {rate_str}"
+                  f"{', ' + eta_str if eta_str else ''})")
 
         elif etype == "file_complete":
             verdict = "SUCCESS" if event["success"] else "FAILED"
