@@ -613,7 +613,8 @@ let offersWeReceived = new Set();
 let rejectedOffers = {};
 
 // ---------- Real connection cards + live chunk grid state ----------
-// sessionCards: session_id -> {peerAddr, peerName, handshakeState, currentTransferId}
+// sessionCards: session_id -> {peerAddr, peerName, handshakeState,
+//               activeTransferId, finishedTransferIds, rejectedKeys}
 // transferMeta: transfer_id -> {sessionId, totalChunks, filename, direction,
 //                                expanded, bytesPerSecond, etaSeconds,
 //                                bytesTransferred, totalBytes, finished, success}
@@ -675,8 +676,8 @@ function handleConnectionCardEvent(event) {
   if (event.type === "session_started") {
     sessionCards[event.session_id] = {
       peerAddr: event.peer_addr, peerName: null,
-      handshakeState: "pending", currentTransferId: null,
-      lastRejectedKey: null,
+      handshakeState: "pending", activeTransferId: null,
+      finishedTransferIds: [], rejectedKeys: [],
     };
     renderConnections();
 
@@ -728,7 +729,9 @@ function handleConnectionCardEvent(event) {
       // here - the send form simply becomes available again.)
       rejectedOffers[key] = { filename: event.filename, sessionId: event.session_id };
       const card = sessionCards[event.session_id];
-      if (card) card.lastRejectedKey = key;
+      if (card && !card.rejectedKeys.includes(key)) {
+        card.rejectedKeys.push(key);
+      }
       renderConnections();
     }
 
@@ -758,6 +761,16 @@ function handleConnectionCardEvent(event) {
     if (meta) {
       meta.finished = true;
       meta.success = event.success;
+      meta.endTimeMs = performance.now();
+    }
+    const card = sessionCards[event.session_id];
+    if (card) {
+      if (card.activeTransferId === event.transfer_id) {
+        card.activeTransferId = null;
+      }
+      if (!card.finishedTransferIds.includes(event.transfer_id)) {
+        card.finishedTransferIds.push(event.transfer_id);
+      }
     }
     renderConnections();
   }
@@ -770,12 +783,16 @@ function ensureTransferMeta(key, sessionId, transferId, filename, direction) {
       bytesPerSecond: null, etaSeconds: null,
       bytesTransferred: 0, totalBytes: 0,
       finished: false, success: null,
+      // Recorded client-side (not from the engine) specifically to
+      // compute an average rate and total elapsed time once finished
+      // - startTimeMs at acceptance, endTimeMs at completion.
+      startTimeMs: performance.now(), endTimeMs: null,
     };
   } else if (filename !== "(unknown)") {
     transferMeta[key].filename = filename;
   }
   const card = sessionCards[sessionId];
-  if (card) card.currentTransferId = transferId;
+  if (card) card.activeTransferId = transferId;
 }
 
 function renderConnections() {
@@ -828,8 +845,8 @@ function buildConnectionCard(sessionId) {
 
   if (card.handshakeState === "ok") {
     const pendingOffersForSession = findPendingOffersForSession(sessionId);
-    const key = card.currentTransferId ? transferKey(sessionId, card.currentTransferId) : null;
-    const meta = key ? transferMeta[key] : null;
+    const activeKey = card.activeTransferId ? transferKey(sessionId, card.activeTransferId) : null;
+    const activeMeta = activeKey ? transferMeta[activeKey] : null;
 
     // Every pending offer for this session gets its own independent
     // accept/decline prompt, all shown at once - not just the first
@@ -839,26 +856,26 @@ function buildConnectionCard(sessionId) {
     });
 
     if (pendingOffersForSession.length === 0) {
-      if (meta && !meta.finished) {
-        el.appendChild(buildTransferView(sessionId, card.currentTransferId));
+      if (activeMeta && !activeMeta.finished) {
+        el.appendChild(buildTransferView(sessionId, card.activeTransferId));
       } else {
-        // Either no transfer has happened yet on this card, or the
-        // most recent one already finished - either way, a fresh
-        // send form needs to be available, not permanently blocked
-        // by whatever came before. A finished transfer's summary,
-        // and/or a rejected offer's summary, are PERSISTENT here -
-        // they stay until manually dismissed, not auto-cleared - and
-        // can both be present at once if that's genuinely what
-        // happened most recently on this card.
-        if (meta && meta.finished) {
-          el.appendChild(buildFinishedSummary(sessionId, card.currentTransferId));
-        }
-        if (card.lastRejectedKey && rejectedOffers[card.lastRejectedKey]) {
-          el.appendChild(buildRejectedSummary(sessionId, card.lastRejectedKey));
-        }
         el.appendChild(buildSendForm(sessionId));
       }
     }
+
+    // ALL finished transfers and ALL rejected offers stay listed here,
+    // regardless of what's happening above - each is independently
+    // dismissible, and none get silently replaced by a newer one. This
+    // was a real bug: card.currentTransferId/lastRejectedKey used to
+    // be single slots, so only the MOST RECENT finished/rejected entry
+    // ever showed - a second one silently erased the first before it
+    // could be seen or dismissed.
+    card.finishedTransferIds.forEach(tid => {
+      el.appendChild(buildFinishedSummary(sessionId, tid));
+    });
+    card.rejectedKeys.forEach(key => {
+      el.appendChild(buildRejectedSummary(sessionId, key));
+    });
   }
 
   return el;
@@ -886,13 +903,16 @@ function buildFinishedSummary(sessionId, transferId) {
   dismissBtn.innerHTML = "&times;";
   dismissBtn.title = "Dismiss";
   dismissBtn.onclick = () => {
-    // Only clears THIS transfer's record - if a card was somehow
-    // showing something else by the time this is clicked, don't
-    // touch it.
+    // Only clears THIS specific transfer's record - removes just this
+    // one entry from the list, leaving every other finished/rejected
+    // summary on this card untouched.
     delete transferMeta[key];
     delete chunkStatus[key];
     const card = sessionCards[sessionId];
-    if (card && card.currentTransferId === transferId) card.currentTransferId = null;
+    if (card) {
+      const idx = card.finishedTransferIds.indexOf(transferId);
+      if (idx !== -1) card.finishedTransferIds.splice(idx, 1);
+    }
     renderConnections();
   };
 
@@ -902,6 +922,22 @@ function buildFinishedSummary(sessionId, transferId) {
 
   const { container: grid } = renderChunkGrid(key);
   wrapper.appendChild(grid);
+
+  // Average rate and total elapsed time, computed from timestamps
+  // recorded client-side (at acceptance and at completion) - not
+  // reported by the engine itself, since these are properties of the
+  // WHOLE finished transfer, not any single moment during it.
+  const stats = document.createElement("div");
+  stats.className = "transfer-stats";
+  const durationSec = (meta.endTimeMs != null && meta.startTimeMs != null)
+    ? (meta.endTimeMs - meta.startTimeMs) / 1000 : null;
+  const sizeText = meta.totalBytes ? (meta.totalBytes / 1_000_000).toFixed(2) + " MB" : "";
+  const avgRateText = (durationSec && durationSec > 0 && meta.totalBytes)
+    ? (meta.totalBytes / durationSec / 1_000_000).toFixed(2) + " MB/s avg" : "";
+  const durationText = durationSec != null
+    ? (durationSec < 1 ? "<1s" : Math.round(durationSec) + "s") + " total" : "";
+  stats.innerHTML = `<span>${sizeText}</span><span>${avgRateText}</span><span>${durationText}</span>`;
+  wrapper.appendChild(stats);
 
   return wrapper;
 }
@@ -926,7 +962,10 @@ function buildRejectedSummary(sessionId, key) {
   dismissBtn.onclick = () => {
     delete rejectedOffers[key];
     const card = sessionCards[sessionId];
-    if (card && card.lastRejectedKey === key) card.lastRejectedKey = null;
+    if (card) {
+      const idx = card.rejectedKeys.indexOf(key);
+      if (idx !== -1) card.rejectedKeys.splice(idx, 1);
+    }
     renderConnections();
   };
 
