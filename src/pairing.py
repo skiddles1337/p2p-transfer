@@ -92,20 +92,26 @@ def quick_share(engine, pairing_code: str) -> str:
     """
     The one-click "copy my info" workflow: uses your saved identity
     (my_identity.py - name and default port, so nothing needs
-    retyping), fetches a FRESH public IP live rather than trusting any
-    cached value (a stale IP would silently break for whoever receives
-    this), starts listening on your configured port if you aren't
+    retyping), starts listening on your configured port if you aren't
     already, and generates+registers the invite - all in one call.
+
+    IP handling respects the saved ip_auto/manual_ip preference (see
+    my_identity.py): by default fetches a FRESH public IP live rather
+    than trusting any cached value (a stale IP would silently break
+    for whoever receives this) - but if auto-detection has been turned
+    off (someone's setup genuinely doesn't work with it), uses the
+    saved manual override instead of trying to auto-detect at all.
 
     Returns the connection string, ready to copy to the clipboard -
     actual clipboard writing happens at the presentation layer (GUI),
     not here, keeping this function itself UI-independent and testable
     on its own.
 
-    Raises RuntimeError if the public IP can't be determined (no
-    internet connection, all lookup services unreachable) - the
-    caller should catch this and let the person enter their IP
-    manually instead, per network_info.get_public_ip()'s own contract.
+    Raises RuntimeError if auto-detection is on but the public IP
+    can't be determined (no internet, all lookup services
+    unreachable), OR if auto-detection is off but no manual IP has
+    ever been saved - either way, the caller should catch this and
+    prompt the person to check their connection or enter an IP.
     """
     identity = my_identity.get_identity()
     name = identity["name"] or "Me"
@@ -114,12 +120,21 @@ def quick_share(engine, pairing_code: str) -> str:
     if engine.listening_port != port:
         engine.start_listening(port)
 
-    ip = network_info.get_public_ip()
-    if ip is None:
-        raise RuntimeError(
-            "Could not detect your public IP - check your internet "
-            "connection, or enter your IP manually."
-        )
+    if identity["ip_auto"]:
+        ip = network_info.get_public_ip()
+        if ip is None:
+            raise RuntimeError(
+                "Could not detect your public IP - check your internet "
+                "connection, or turn off auto-detect and enter your IP "
+                "manually."
+            )
+    else:
+        ip = identity["manual_ip"]
+        if not ip:
+            raise RuntimeError(
+                "Auto-detect is off, but no manual IP has been saved yet - "
+                "enter your public IP first."
+            )
 
     return create_invite(engine, name, ip, port, pairing_code)
 

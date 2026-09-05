@@ -544,6 +544,31 @@ language/locale, log verbosity.
 **Not yet designed:** concrete layout and the connection-string UI
 flow's fine details.
 
+**Visual style — decided.** Two full static HTML previews were built
+(not via an inline design tool, deliberately — see below) and compared
+side by side: a warm "vintage electronics" direction (copper/charcoal,
+slab serif) versus a cooler "network console" direction (teal/graphite,
+monospace-leaning). **Chosen: the cool network console direction.**
+Tokens:
+- Background `#14181C`, surface `#1B2126`, raised surface `#212830`
+- Accent (the one reserved "live/active" color) `#4FC3B0` (teal)
+- Secondary/in-progress `#6FA8DC`, danger `#C4626B`
+- Text `#E4E9ED`, dim text `#7C8A94`, border `#2A3238`
+- Type: `Space Grotesk` for section headers, `IBM Plex Sans` for body/
+  UI, `IBM Plex Mono` for field labels/values and anything genuinely
+  technical (IPs, transfer IDs, log lines) — monospace used
+  semantically, not decoratively.
+- Sharp corners (2-3px radius), left-border accent on active elements
+  rather than a full border — evokes network/terminal chrome rather
+  than a rounded-card SaaS look.
+
+Note on process: the previews were built as real, standalone HTML
+files with fully custom CSS, NOT via Claude's inline visualizer tool -
+that tool is calibrated to Claude's own design system (a fixed,
+restricted palette, no gradients/shadows, Claude's own fonts), which
+would have shown a "Claude-ified" approximation rather than an accurate
+preview of this app's actual, fully custom-branded look.
+
 **Confirmed via isolated experiment (`tests/gui_experiments/`), before
 any real GUI code was written:**
 - `window.evaluate_js()` can be safely called from a background thread

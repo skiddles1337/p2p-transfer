@@ -697,6 +697,24 @@ class Engine:
                 self._listen_socket.close()
             except OSError:
                 pass
+
+        # Closing the socket above does NOT guarantee the OS has
+        # actually released the port yet - the accept_loop background
+        # thread could still be blocked inside srv.accept() at this
+        # exact moment (up to its 1-second timeout window). On Linux,
+        # closing a socket while another thread is still blocked
+        # inside a syscall on it doesn't necessarily release the
+        # underlying port binding until that thread's own call
+        # actually unblocks and returns. Without waiting here, an
+        # immediate subsequent start_listening() on the SAME port
+        # (e.g. quick_share() re-checking listening_port right away)
+        # can race against this and fail with "Address already in
+        # use" - reproduced reliably in testing. Joining here
+        # (bounded, so a genuinely stuck thread can't hang this call
+        # forever) ensures the thread has actually stopped touching
+        # the socket before we report "stopped" to the caller.
+        if self._listen_thread is not None:
+            self._listen_thread.join(timeout=2.0)
         self._emit("log", message="Stopped listening.")
 
     @property

@@ -156,8 +156,8 @@ class Bridge:
     def get_identity(self):
         return my_identity.get_identity()
 
-    def set_identity(self, name=None, port=None):
-        my_identity.set_identity(name=name, port=port)
+    def set_identity(self, name=None, port=None, ip_auto=None, manual_ip=None):
+        my_identity.set_identity(name=name, port=port, ip_auto=ip_auto, manual_ip=manual_ip)
 
     def get_public_ip(self):
         # Wrapped in a dict (rather than returning the bare string or

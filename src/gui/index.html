@@ -1,0 +1,609 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>P2P Transfer</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600&family=IBM+Plex+Sans:wght@400;500&family=IBM+Plex+Mono:wght@400;500&display=swap');
+
+    :root {
+      --bg: #14181C;
+      --surface: #1B2126;
+      --surface-raised: #212830;
+      --accent: #4FC3B0;
+      --success: #6FA8DC;
+      --danger: #C4626B;
+      --text: #E4E9ED;
+      --text-dim: #7C8A94;
+      --border: #2A3238;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'IBM Plex Sans', sans-serif;
+      display: flex;
+      height: 100vh;
+    }
+
+    /* ---------- Sidebar ---------- */
+
+    .sidebar {
+      width: 260px;
+      background: var(--surface);
+      border-right: 1px solid var(--border);
+      padding: 20px;
+      flex-shrink: 0;
+      overflow-y: auto;
+    }
+
+    .sidebar h1 {
+      font-family: 'Space Grotesk', sans-serif;
+      font-size: 16px;
+      font-weight: 600;
+      margin: 0 0 20px;
+      letter-spacing: 0.3px;
+    }
+
+    .field { margin-bottom: 12px; }
+
+    .field label {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      color: var(--text-dim);
+      margin-bottom: 4px;
+      font-family: 'IBM Plex Mono', monospace;
+    }
+
+    .field label .spacer { flex: 1; }
+
+    .field input, .field textarea {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 2px;
+      color: var(--text);
+      padding: 7px 9px;
+      font-size: 13px;
+      font-family: 'IBM Plex Mono', monospace;
+      width: 100%;
+    }
+
+    .field input:read-only {
+      color: var(--text-dim);
+      background: var(--surface-raised);
+    }
+
+    .field textarea { resize: vertical; }
+
+    .ip-port-row {
+      display: flex;
+      gap: 6px;
+    }
+
+    .ip-port-row input.ip { flex: 1; min-width: 0; }
+    .ip-port-row input.port { width: 60px; flex-shrink: 0; }
+
+    .checkbox-inline {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 11px;
+      color: var(--text-dim);
+    }
+
+    .checkbox-inline input { width: auto; padding: 0; }
+
+    button.link-btn {
+      background: none;
+      border: none;
+      color: var(--accent);
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 11px;
+      cursor: pointer;
+      padding: 0;
+    }
+
+    button.link-btn.danger { color: var(--danger); }
+
+    .status-row {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      margin: 16px 0;
+      font-size: 12px;
+      font-family: 'IBM Plex Mono', monospace;
+    }
+
+    .status-row.listening { color: var(--accent); }
+    .status-row.offline { color: var(--text-dim); }
+
+    .dot {
+      width: 6px;
+      height: 6px;
+      flex-shrink: 0;
+      background: currentColor;
+    }
+
+    .btn {
+      width: 100%;
+      background: transparent;
+      color: var(--accent);
+      border: 1px solid var(--accent);
+      border-radius: 2px;
+      padding: 9px;
+      font-size: 12px;
+      font-family: 'IBM Plex Mono', monospace;
+      font-weight: 500;
+      cursor: pointer;
+      margin-bottom: 8px;
+      letter-spacing: 0.3px;
+    }
+
+    .btn:hover { background: rgba(79, 195, 176, 0.08); }
+
+    .btn-row {
+      display: flex;
+      gap: 6px;
+    }
+
+    .btn-row .btn { margin-bottom: 0; }
+
+    .nav {
+      margin-top: 24px;
+      border-top: 1px solid var(--border);
+      padding-top: 16px;
+    }
+
+    .nav-item {
+      padding: 8px 10px;
+      border-radius: 2px;
+      font-size: 13px;
+      color: var(--text-dim);
+      margin-bottom: 2px;
+      border-left: 2px solid transparent;
+      cursor: pointer;
+    }
+
+    .nav-item:hover { color: var(--text); }
+
+    .nav-item.active {
+      background: var(--surface-raised);
+      color: var(--text);
+      border-left: 2px solid var(--accent);
+    }
+
+    /* ---------- Main content ---------- */
+
+    .main {
+      flex: 1;
+      padding: 28px 32px;
+      overflow-y: auto;
+    }
+
+    .main h2 {
+      font-family: 'Space Grotesk', sans-serif;
+      font-size: 18px;
+      font-weight: 600;
+      margin: 0 0 18px;
+    }
+
+    .section { display: none; }
+    .section.active { display: block; }
+
+    .placeholder {
+      color: var(--text-dim);
+      font-size: 13px;
+      padding: 20px 0;
+    }
+
+    #offersDiv .offer-row {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-left: 2px solid var(--success);
+      border-radius: 3px;
+      padding: 10px 14px;
+      margin-bottom: 8px;
+      font-size: 13px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .offer-row .link-btn { font-size: 12px; margin-left: 10px; }
+
+    .empty-note {
+      color: var(--text-dim);
+      font-size: 13px;
+    }
+
+    /* ---------- Dev/details panel ---------- */
+
+    details.devpanel {
+      margin-top: 28px;
+      border-top: 1px solid var(--border);
+      padding-top: 16px;
+    }
+
+    details.devpanel summary {
+      font-family: 'Space Grotesk', sans-serif;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      color: var(--text-dim);
+    }
+
+    details.devpanel summary:hover { color: var(--text); }
+
+    details.devpanel .devbody { margin-top: 16px; }
+
+    details.devpanel h3 {
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--text-dim);
+      margin: 20px 0 8px;
+      text-transform: none;
+    }
+
+    pre#sessionsDiv {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      padding: 14px 16px;
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 12px;
+      color: var(--text-dim);
+      overflow-x: auto;
+    }
+
+    .inline-row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 12px;
+      flex-wrap: wrap;
+    }
+
+    .inline-row input {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 2px;
+      color: var(--text);
+      padding: 7px 9px;
+      font-size: 13px;
+      font-family: 'IBM Plex Mono', monospace;
+    }
+
+    #logDiv {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      padding: 12px 16px;
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 11px;
+      color: var(--text-dim);
+      line-height: 1.7;
+      height: 220px;
+      overflow-y: auto;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="sidebar">
+    <h1>P2P TRANSFER</h1>
+
+    <div class="field">
+      <label>name</label>
+      <input id="myName" onblur="onNameBlur()">
+    </div>
+
+    <div class="field">
+      <label>
+        ip
+        <span class="spacer"></span>
+        <span class="checkbox-inline">
+          <input type="checkbox" id="ipAutoCheck" checked onchange="onIpAutoToggle()">
+          auto
+        </span>
+        <button class="link-btn" onclick="refreshIp()">refresh</button>
+      </label>
+      <div class="ip-port-row">
+        <input class="ip" id="myIp" readonly onblur="onIpBlur()">
+        <input class="port" id="myPort" value="5001" onblur="onPortBlur()">
+      </div>
+    </div>
+
+    <div class="field">
+      <label>pairing_code</label>
+      <input id="pairingCode" value="6666">
+    </div>
+
+    <div class="status-row offline" id="listenStatus">
+      <div class="dot"></div>
+      <span id="listenStatusText">not listening</span>
+    </div>
+
+    <div class="field">
+      <label>connection string</label>
+      <textarea id="connectionBox" rows="3" placeholder="Paste a friend's invite here, or use Quick share to generate your own"></textarea>
+    </div>
+    <div class="btn-row">
+      <button class="btn" onclick="doQuickShare()">quick share</button>
+      <button class="btn" onclick="doConnect()">connect</button>
+    </div>
+
+    <div class="nav">
+      <div class="nav-item active" onclick="showSection('connections', this)">Connections</div>
+      <div class="nav-item" onclick="showSection('contacts', this)">Contacts</div>
+      <div class="nav-item" onclick="showSection('history', this)">History</div>
+      <div class="nav-item" onclick="showSection('partial', this)">Partial downloads</div>
+      <div class="nav-item" onclick="showSection('settings', this)">Settings</div>
+    </div>
+  </div>
+
+  <div class="main">
+
+    <div class="section active" id="section-connections">
+      <h2>Connections</h2>
+      <p class="placeholder">Real session cards (with the live chunk grid) aren't built yet -
+        the panel below is a temporary developer view standing in for them.</p>
+
+      <h2>Pending incoming offers</h2>
+      <div id="offersDiv"><p class="empty-note">No pending offers.</p></div>
+
+      <details class="devpanel">
+        <summary>Details / dev tools</summary>
+        <div class="devbody">
+
+          <h3>Live snapshot</h3>
+          <button class="btn" style="width:auto; padding:8px 14px;" onclick="refreshSnapshot()">refresh snapshot</button>
+          <pre id="sessionsDiv"></pre>
+
+          <h3>Send a file</h3>
+          <div class="inline-row">
+            <input id="sendSessionId" placeholder="session id" size="10">
+            <input id="sendPath" placeholder="file path" style="flex:1; min-width:300px;">
+            <button class="btn" style="width:auto; padding:8px 14px;" onclick="doSend()">send</button>
+          </div>
+
+          <h3>Cancel a transfer</h3>
+          <div class="inline-row">
+            <input id="cancelSessionId" placeholder="session id" size="10">
+            <input id="cancelTransferId" placeholder="transfer id (hex)" style="flex:1; min-width:300px;">
+            <button class="btn" style="width:auto; padding:8px 14px;" onclick="doCancel()">cancel</button>
+          </div>
+
+          <h3>Raw event log</h3>
+          <div id="logDiv"></div>
+
+        </div>
+      </details>
+    </div>
+
+    <div class="section" id="section-contacts">
+      <h2>Contacts</h2>
+      <p class="placeholder">Not built yet — planned: saved contact list, aliasing, renaming, staleness indicator.</p>
+    </div>
+
+    <div class="section" id="section-history">
+      <h2>History</h2>
+      <p class="placeholder">Not built yet — planned: past transfer log.</p>
+    </div>
+
+    <div class="section" id="section-partial">
+      <h2>Partial downloads</h2>
+      <p class="placeholder">Not built yet — planned: browsable incomplete transfers, groundwork for resume.</p>
+    </div>
+
+    <div class="section" id="section-settings">
+      <h2>Settings</h2>
+      <p class="placeholder">Not built yet — planned: default save location, notifications, theme.</p>
+    </div>
+
+  </div>
+
+<script>
+let pendingOffers = {};
+
+function showSection(name, navEl) {
+  document.querySelectorAll(".section").forEach(el => el.classList.remove("active"));
+  document.getElementById("section-" + name).classList.add("active");
+  document.querySelectorAll(".nav-item").forEach(el => el.classList.remove("active"));
+  navEl.classList.add("active");
+}
+
+function onEngineEvent(base64Payload) {
+  const jsonStr = atob(base64Payload);
+  const event = JSON.parse(jsonStr);
+
+  logEvent(event);
+
+  if (event.type === "file_offer_received") {
+    pendingOffers[event.offer_id] = event;
+    renderOffers();
+  }
+
+  if (event.type === "file_offer_answered" || event.type === "file_complete"
+      || event.type === "session_started" || event.type === "session_closed"
+      || event.type === "handshake_result") {
+    refreshSnapshot();
+  }
+}
+
+function logEvent(event) {
+  const div = document.getElementById("logDiv");
+  const line = document.createElement("div");
+  line.textContent = JSON.stringify(event);
+  div.appendChild(line);
+  div.scrollTop = div.scrollHeight;
+}
+
+function renderOffers() {
+  const div = document.getElementById("offersDiv");
+  const ids = Object.keys(pendingOffers);
+  if (ids.length === 0) {
+    div.innerHTML = '<p class="empty-note">No pending offers.</p>';
+    return;
+  }
+  div.innerHTML = "";
+  for (const id of ids) {
+    const o = pendingOffers[id];
+    const row = document.createElement("div");
+    row.className = "offer-row";
+    row.innerHTML = `<span>#${id} '${o.filename}' (${o.filesize} bytes) on session ${o.session_id}</span>`;
+
+    const acceptBtn = document.createElement("button");
+    acceptBtn.className = "link-btn";
+    acceptBtn.textContent = "accept";
+    acceptBtn.onclick = () => respondToOffer(id, true);
+
+    const rejectBtn = document.createElement("button");
+    rejectBtn.className = "link-btn danger";
+    rejectBtn.textContent = "reject";
+    rejectBtn.onclick = () => respondToOffer(id, false);
+
+    row.appendChild(acceptBtn);
+    row.appendChild(rejectBtn);
+    div.appendChild(row);
+  }
+}
+
+function respondToOffer(offerId, accept) {
+  window.pywebview.api.respond_to_offer(parseInt(offerId), accept).then(() => {
+    delete pendingOffers[offerId];
+    renderOffers();
+  });
+}
+
+// ---------- Identity: auto-save on blur, no explicit save button ----------
+
+function onNameBlur() {
+  window.pywebview.api.set_identity(document.getElementById("myName").value, null, null, null);
+}
+
+function onPortBlur() {
+  const port = parseInt(document.getElementById("myPort").value);
+  window.pywebview.api.set_identity(null, port, null, null);
+}
+
+function onIpBlur() {
+  // Only meaningful in manual mode - the field is read-only while
+  // auto is checked, so this only fires from a genuine user edit.
+  const ip = document.getElementById("myIp").value;
+  window.pywebview.api.set_identity(null, null, null, ip);
+}
+
+function onIpAutoToggle() {
+  const auto = document.getElementById("ipAutoCheck").checked;
+  const ipField = document.getElementById("myIp");
+  ipField.readOnly = auto;
+
+  if (auto) {
+    window.pywebview.api.set_identity(null, null, true, null);
+    refreshIp();
+  } else {
+    // Save whatever's CURRENTLY shown (the last auto-fetched value)
+    // as the starting manual value - don't blank the field, matching
+    // "still displays it" even when switching to manual.
+    window.pywebview.api.set_identity(null, null, false, ipField.value);
+  }
+}
+
+function refreshIp() {
+  window.pywebview.api.get_public_ip().then(result => {
+    if (result.ip) {
+      document.getElementById("myIp").value = result.ip;
+      if (document.getElementById("ipAutoCheck").checked) {
+        window.pywebview.api.set_identity(null, null, null, result.ip);
+      }
+    } else {
+      alert("Couldn't detect your public IP - check your internet connection, " +
+            "or turn off auto and enter it manually.");
+    }
+  });
+}
+
+function doQuickShare() {
+  const code = document.getElementById("pairingCode").value;
+  window.pywebview.api.quick_share(code).then(result => {
+    if (result.success) {
+      document.getElementById("connectionBox").value = result.invite;
+      refreshSnapshot();
+    } else {
+      alert("Quick share failed: " + result.error);
+    }
+  });
+}
+
+function doConnect() {
+  const text = document.getElementById("connectionBox").value;
+  const code = document.getElementById("pairingCode").value;
+  window.pywebview.api.paste_and_connect(text, code).then(result => {
+    if (result.success) {
+      alert("Connected. session_id = " + result.session_id);
+      refreshSnapshot();
+    } else {
+      alert("Couldn't connect - check the pairing code and the connection string.");
+    }
+  });
+}
+
+function doSend() {
+  const sid = parseInt(document.getElementById("sendSessionId").value);
+  const path = document.getElementById("sendPath").value;
+  window.pywebview.api.send_file(sid, path);
+}
+
+function doCancel() {
+  const sid = parseInt(document.getElementById("cancelSessionId").value);
+  const transferId = document.getElementById("cancelTransferId").value;
+  window.pywebview.api.cancel_transfer(sid, transferId);
+}
+
+function refreshSnapshot() {
+  window.pywebview.api.get_state_snapshot().then(snapshot => {
+    document.getElementById("sessionsDiv").textContent = JSON.stringify(snapshot, null, 2);
+
+    const statusRow = document.getElementById("listenStatus");
+    const statusText = document.getElementById("listenStatusText");
+    if (snapshot.listening) {
+      statusRow.className = "status-row listening";
+      statusText.textContent = "listening :" + snapshot.listening_port;
+    } else {
+      statusRow.className = "status-row offline";
+      statusText.textContent = "not listening";
+    }
+  });
+}
+
+function loadIdentity() {
+  window.pywebview.api.get_identity().then(identity => {
+    document.getElementById("myName").value = identity.name;
+    document.getElementById("myPort").value = identity.port;
+
+    const autoCheck = document.getElementById("ipAutoCheck");
+    const ipField = document.getElementById("myIp");
+    autoCheck.checked = identity.ip_auto;
+    ipField.readOnly = identity.ip_auto;
+
+    if (identity.ip_auto) {
+      refreshIp();
+    } else {
+      ipField.value = identity.manual_ip;
+    }
+  });
+}
+
+window.addEventListener("pywebviewready", function () {
+  loadIdentity();
+  refreshSnapshot();
+});
+</script>
+</body>
+</html>
