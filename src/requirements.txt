@@ -1,2 +1,3 @@
 cryptography
 platformdirs
+pywebview>=5.0

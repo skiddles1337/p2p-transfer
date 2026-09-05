@@ -642,16 +642,27 @@ rebuild the reasoning from scratch mid-debugging.
   supports this without changes.
 - No peer folder browsing/requesting — a bigger feature needing its
   own permission model.
-- **Drag-and-drop file paths: confirmed NOT supported** on this app's
-  actual target platform (Windows, `pywebview`'s WebView2 backend) —
-  tested on a real machine, not just suspected. Removed entirely
-  rather than left in as dead code that always fails with an error;
-  the native OS file picker (`Bridge.pick_files()`, via `pywebview`'s
-  `create_file_dialog`) is the sole, reliable way to select files to
-  send, and sends every selected file immediately rather than just
-  filling a path field.
-- **Folder drag-and-drop/zip-or-individual is deliberately deferred** —
-  not built yet, and moot now given the above.
+- **Drag-and-drop file paths — corrected finding, now implemented.**
+  Earlier testing confirmed a JS-side `file.path` property genuinely
+  doesn't work on this app's target platform (WebView2) — that
+  conclusion was correct and that approach was rightly removed.
+  However, `pywebview` (>= 5.0, now pinned in `requirements.txt`) has a
+  **separate, first-class, Python-side** mechanism for exactly this:
+  subscribing to `window.dom.document.events.drop`, whose event data
+  includes each dropped file's real path under `dataTransfer.files[i]
+  .pywebviewFullPath` (confirmed via a real drop on the actual target
+  platform — `experiment_3_dom_drop_paths.py` — a genuine, real
+  absolute path, not a guess). Implemented in `gui_app.py`: since this
+  subscription is document-global rather than scoped to one element,
+  each connection card's send form gets a dedicated, non-interactive
+  drop-zone element with a unique `id="drop-zone-<session_id>"`,
+  read back from the event's `target.id` to route the drop to the
+  correct session's `send_file()` — the same underlying action the
+  "browse..." button already uses. JS handles only the cosmetic
+  `dragover`/`dragleave` hover styling; actual path extraction is
+  entirely Python-side.
+- **Folder drag-and-drop/zip-or-individual remains deliberately
+  deferred** — not built yet.
 - Fixed a real bug found via actual multi-file use: a connection
   card's "send" form permanently disappeared once ANY transfer on
   that card finished (the check for "is there a transfer to display"

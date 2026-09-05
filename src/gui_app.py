@@ -63,6 +63,50 @@ def main():
     window_holder["window"] = window
     bridge.set_window(window)
 
+    def on_dom_drop(e):
+        """
+        Real drag-and-drop, using pywebview's dedicated DOM-drop-event
+        mechanism (confirmed working via
+        tests/gui_experiments/experiment_3_dom_drop_paths.py on a real
+        Windows/WebView2 setup) - NOT the JS-side file.path approach we
+        tried first, which genuinely doesn't work and was removed.
+
+        This subscription is GLOBAL (the whole document), not scoped
+        to one element - so to know WHICH connection card a file was
+        dropped onto, each card's dedicated drop-zone element carries
+        a unique id ("drop-zone-<session_id>"), read back here via
+        e['target']['id']. The drop-zone element deliberately has no
+        interactive children (no buttons/inputs) so a drop landing
+        anywhere inside it always reports itself as the target,
+        never some nested child instead.
+        """
+        target_id = (e.get("target") or {}).get("id", "")
+        if not target_id.startswith("drop-zone-"):
+            return  # dropped somewhere else on the page - not ours to handle
+
+        session_id_str = target_id[len("drop-zone-"):]
+        try:
+            session_id = int(session_id_str)
+        except ValueError:
+            return
+
+        files = (e.get("dataTransfer") or {}).get("files", [])
+        for f in files:
+            path = f.get("pywebviewFullPath")
+            if path:
+                bridge.send_file(session_id, path)
+
+    def setup_dom_events():
+        try:
+            window.dom.document.events.drop += on_dom_drop
+        except AttributeError:
+            # Older pywebview (pre-5.0) doesn't have this API at all -
+            # fail quietly rather than crashing the whole app; the
+            # "browse..." button remains fully functional regardless.
+            pass
+
+    window.events.loaded += setup_dom_events
+
     # debug=True opens dev tools automatically (or makes them
     # available via right-click) - genuinely useful right now, since
     # any JS-side error (a typo, a bad selector) would otherwise fail

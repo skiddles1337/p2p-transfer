@@ -350,6 +350,23 @@
       margin-bottom: 0;
     }
 
+    .drop-zone {
+      margin-top: 8px;
+      padding: 14px;
+      border: 1px dashed var(--border);
+      border-radius: 3px;
+      text-align: center;
+      font-size: 11px;
+      color: var(--text-dim);
+      font-family: 'IBM Plex Mono', monospace;
+    }
+
+    .drop-zone.drag-over {
+      border-color: var(--accent);
+      background: rgba(79, 195, 176, 0.06);
+      color: var(--accent);
+    }
+
     .conn-card-actions {
       display: flex;
       gap: 8px;
@@ -1146,6 +1163,37 @@ function buildSendForm(sessionId) {
   row.appendChild(sendBtn);
   row.appendChild(browseBtn);
   wrapper.appendChild(row);
+
+  // Real drag-and-drop target - confirmed working via pywebview's
+  // dedicated DOM-drop-event mechanism (subscribed to in gui_app.py,
+  // NOT here in JS - a JS-side file.path genuinely doesn't work and
+  // was removed earlier; this is a completely different, real
+  // mechanism). This element deliberately has NO interactive children
+  // (no buttons/inputs) so a drop landing anywhere inside it always
+  // reports ITSELF as the event target - gui_app.py reads this
+  // element's id to know which session to route the dropped file(s)
+  // to. dragover/dragleave here are purely cosmetic (highlighting)
+  // and don't need real paths, so handling them in JS is fine - only
+  // the actual 'drop' data extraction needs the Python-side mechanism.
+  const dropZone = document.createElement("div");
+  dropZone.id = "drop-zone-" + sessionId;
+  dropZone.className = "drop-zone";
+  dropZone.textContent = "Drop a file here to send";
+  dropZone.addEventListener("dragover", (e) => {
+    e.preventDefault();
+    dropZone.classList.add("drag-over");
+  });
+  dropZone.addEventListener("dragleave", () => {
+    dropZone.classList.remove("drag-over");
+  });
+  dropZone.addEventListener("drop", (e) => {
+    e.preventDefault();  // stop the browser's default "navigate to file"
+    dropZone.classList.remove("drag-over");
+    // No path extraction here - see gui_app.py's on_dom_drop for the
+    // actual mechanism. This JS handler exists only to prevent the
+    // browser's default behavior and clear the hover style.
+  });
+  wrapper.appendChild(dropZone);
 
   return wrapper;
 }
