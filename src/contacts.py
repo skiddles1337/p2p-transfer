@@ -16,11 +16,23 @@ directory rather than alongside downloads.
 
 import os
 import time
+import threading
 import platformdirs
 import json_store
 
 APP_NAME = "p2p-transfer"
 CONTACTS_PATH = os.path.join(platformdirs.user_config_dir(APP_NAME, appauthor=False), "contacts.json")
+
+# Guards every read-modify-write cycle below (load_contacts(), modify
+# the dict, save_contacts()). Without this, two concurrent calls (e.g.
+# two rapid GUI actions) can both load the same starting state, each
+# modify their own in-memory copy, and each save - the SECOND save
+# silently overwrites the first's change entirely (a classic lost-
+# update race), and in the worst case, both writes can collide on the
+# same temporary file mid-write and crash outright. json_store's
+# atomic write alone can't prevent this, since the race lives in the
+# GAP between load and save, not in the write itself.
+_lock = threading.Lock()
 
 
 def load_contacts() -> dict:
@@ -56,16 +68,17 @@ def add_contact(name: str, ip: str, port: int, passphrase: str) -> None:
     re-pairing (e.g. after their IP changed) shouldn't wipe out a
     nickname you'd already set for them.
     """
-    contacts = load_contacts()
-    existing_alias = contacts.get(name, {}).get("alias")
-    contacts[name] = {
-        "ip": ip,
-        "port": port,
-        "passphrase": passphrase,
-        "paired_at": time.time(),
-        "alias": existing_alias,
-    }
-    save_contacts(contacts)
+    with _lock:
+        contacts = load_contacts()
+        existing_alias = contacts.get(name, {}).get("alias")
+        contacts[name] = {
+            "ip": ip,
+            "port": port,
+            "passphrase": passphrase,
+            "paired_at": time.time(),
+            "alias": existing_alias,
+        }
+        save_contacts(contacts)
 
 
 def set_alias(name: str, alias: str | None) -> bool:
@@ -80,12 +93,13 @@ def set_alias(name: str, alias: str | None) -> bool:
     Returns True if the contact existed and was updated, False
     otherwise.
     """
-    contacts = load_contacts()
-    if name not in contacts:
-        return False
-    contacts[name]["alias"] = alias
-    save_contacts(contacts)
-    return True
+    with _lock:
+        contacts = load_contacts()
+        if name not in contacts:
+            return False
+        contacts[name]["alias"] = alias
+        save_contacts(contacts)
+        return True
 
 
 def display_name(name: str) -> str:
@@ -121,26 +135,28 @@ def rename_contact(old_name: str, new_name: str) -> bool:
     Returns False without changing anything if new_name already exists
     (as a DIFFERENT contact) - refuses to silently overwrite someone else.
     """
-    contacts = load_contacts()
-    if old_name not in contacts:
-        return False
-    if new_name in contacts and new_name != old_name:
-        return False
+    with _lock:
+        contacts = load_contacts()
+        if old_name not in contacts:
+            return False
+        if new_name in contacts and new_name != old_name:
+            return False
 
-    contacts[new_name] = contacts.pop(old_name)
-    save_contacts(contacts)
-    return True
+        contacts[new_name] = contacts.pop(old_name)
+        save_contacts(contacts)
+        return True
 
 
 def remove_contact(name: str) -> bool:
     """Remove a contact by name. Returns True if it existed and was
     removed, False if there was no such contact."""
-    contacts = load_contacts()
-    if name not in contacts:
-        return False
-    del contacts[name]
-    save_contacts(contacts)
-    return True
+    with _lock:
+        contacts = load_contacts()
+        if name not in contacts:
+            return False
+        del contacts[name]
+        save_contacts(contacts)
+        return True
 
 
 def get_contact(name: str) -> dict | None:

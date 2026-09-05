@@ -354,6 +354,23 @@ file the app writes (contacts, history, settings, manifests):
   `.corrupted` suffix rather than silently losing it or crashing the
   whole app on startup.
 
+**Concurrency safety for contacts/history** (`contacts.py`/
+`history.py`, each with their own `threading.Lock`): the atomic write
+above prevents *corruption* mid-write, but does not by itself prevent
+a *lost update* — two concurrent operations can each load the same
+starting state, modify their own copy, and save, with the second save
+silently overwriting the first's change (or, worse, both writes
+colliding on the identical temp filename and crashing outright). Every
+function that reads-modifies-writes these files (`add_contact`,
+`remove_contact`, `set_alias`, `rename_contact`, `record_transfer`)
+wraps its full cycle in a lock. `reset_save_dir()`/`clear_history()`
+use try/except rather than check-then-remove, for the same reason —
+avoiding a race between checking a file exists and removing it.
+Verified under real concurrent load: 20 threads adding contacts
+simultaneously (previously lost updates and an outright crash on a
+shared temp filename), and a realistic mix of concurrent adds/
+renames/aliases together — both clean after the fix.
+
 **Contacts** (`contacts.py`) — `{name: {ip, port, passphrase,
 paired_at, alias}}`, in a config directory (not "a JSON file next to
 the app").

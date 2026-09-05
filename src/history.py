@@ -12,6 +12,7 @@ directly, keeping it decoupled and independently testable.
 
 import os
 import time
+import threading
 import platformdirs
 import json_store
 
@@ -20,8 +21,16 @@ HISTORY_PATH = os.path.join(platformdirs.user_data_dir(APP_NAME, appauthor=False
 
 # Keep the history from growing without bound - a personal file
 # transfer tool doesn't need to keep years of records, and an
-# unbounded file would slowly get more expensive to load/save.
+# ever-growing file would slowly cost more to load/save.
 MAX_ENTRIES = 500
+
+# Guards record_transfer's read-modify-write cycle - see contacts.py's
+# _lock for the full reasoning. This one matters especially: multiple
+# sessions completing transfers at nearly the same moment (e.g. two
+# simultaneous file receives finishing close together) is a genuinely
+# realistic scenario, not just a theoretical edge case, and each
+# completion calls record_transfer().
+_lock = threading.Lock()
 
 
 def load_history() -> list[dict]:
@@ -57,17 +66,24 @@ def record_transfer(direction: str, peer_name: str, filename: str,
         "detail": detail,
     }
 
-    entries = load_history()
-    entries.insert(0, entry)
-    entries = entries[:MAX_ENTRIES]  # trim oldest if over the cap
-
-    json_store.atomic_write_json(HISTORY_PATH, entries)
+    with _lock:
+        entries = load_history()
+        entries.insert(0, entry)
+        entries = entries[:MAX_ENTRIES]  # trim oldest if over the cap
+        json_store.atomic_write_json(HISTORY_PATH, entries)
 
 
 def clear_history() -> None:
-    """Erase all recorded history - e.g. for a 'clear history' button."""
-    if os.path.exists(HISTORY_PATH):
+    """
+    Erase all recorded history - e.g. for a 'clear history' button.
+    Uses try/except rather than check-then-remove, for the same reason
+    as storage.py's reset_save_dir - "already gone" is a fine outcome
+    regardless of which concurrent call actually removed it.
+    """
+    try:
         os.remove(HISTORY_PATH)
+    except FileNotFoundError:
+        pass
 
 
 if __name__ == "__main__":

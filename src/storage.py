@@ -94,9 +94,18 @@ def set_save_dir(path: str) -> None:
 
 
 def reset_save_dir() -> None:
-    """Clear any override, reverting to DEFAULT_SAVE_DIR."""
-    if os.path.exists(_SAVE_DIR_CONFIG_PATH):
+    """
+    Clear any override, reverting to DEFAULT_SAVE_DIR. Uses try/except
+    rather than checking existence first - a check-then-remove pattern
+    has its own small race (the file could be removed by a concurrent
+    call between the check and the removal) - either way "the override
+    is gone" is the desired end state, so a FileNotFoundError here is
+    harmless and simply ignored rather than treated as an error.
+    """
+    try:
         os.remove(_SAVE_DIR_CONFIG_PATH)
+    except FileNotFoundError:
+        pass
 
 
 def get_staging_dir() -> str:
