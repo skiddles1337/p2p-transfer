@@ -1,11 +1,12 @@
 """
 keyexchange.py
 
-Wraps the X25519 Diffie-Hellman key exchange primitives we'll use for
-session encryption. This file starts as an ISOLATED PROOF that the
-core math works - two independently generated keypairs, exchanging
-only their PUBLIC keys, land on the identical shared secret - before
-we wire any of this into the real handshake in sender.py/listener.py.
+Wraps the X25519 Diffie-Hellman key exchange primitives used for
+session encryption - core, actively-used code, imported by engine.py
+for every session's handshake (not a standalone proof-of-concept -
+this file started that way, but sender.py/listener.py, which it was
+originally written to be wired into, have since been retired in favor
+of engine.py, which is what actually calls these functions now).
 
 X25519 is a specific, modern, widely-trusted implementation of
 elliptic-curve Diffie-Hellman (the same underlying idea used in
@@ -99,7 +100,9 @@ def derive_session_key(shared_secret: bytes) -> bytes:
 if __name__ == "__main__":
     from auth import compute_confirmation_tag, verify_confirmation_tag
 
-    def run_exchange(listener_passphrase_override=None, tamper=False):
+    TEST_PASSPHRASE = "test-passphrase"
+
+    def run_exchange(tamper=False):
         """
         Simulate a full authenticated exchange. If tamper=True,
         simulate an attacker swapping in a different public key after
@@ -112,7 +115,9 @@ if __name__ == "__main__":
         sender_public_bytes = public_key_to_bytes(sender_public)
 
         # Sender computes its confirmation tag over (listener_pub, sender_pub).
-        sender_tag = compute_confirmation_tag(listener_public_bytes, sender_public_bytes)
+        sender_tag = compute_confirmation_tag(
+            TEST_PASSPHRASE, listener_public_bytes, sender_public_bytes
+        )
 
         transmitted_sender_public_bytes = sender_public_bytes
         if tamper:
@@ -123,7 +128,7 @@ if __name__ == "__main__":
 
         # Listener verifies using whatever bytes actually "arrived".
         ok = verify_confirmation_tag(
-            sender_tag, listener_public_bytes, transmitted_sender_public_bytes
+            sender_tag, TEST_PASSPHRASE, listener_public_bytes, transmitted_sender_public_bytes
         )
         print(f"{'[TAMPERED] ' if tamper else ''}Listener verifies sender's tag: "
               f"{'OK' if ok else 'REJECTED'}")

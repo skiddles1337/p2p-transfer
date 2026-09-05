@@ -9,7 +9,10 @@ peers. Every message on the wire looks like:
     [ N bytes : payload        ]
 
 This module only deals with turning a (type, payload) pair into bytes,
-and back again. It knows nothing about sockets or files yet.
+and back again, plus packing/unpacking the internal structure of each
+specific message type's payload (file offers, chunks, the handshake).
+It's deliberately independent of sockets/threads (that's engine.py's
+job) and stays that way permanently - not a "not yet" limitation.
 """
 
 import struct
@@ -19,8 +22,9 @@ import hashlib
 # Each is just a distinct integer (0-255, since we're using 1 byte).
 MSG_HELLO = 1       # payload: listener's X25519 public key (32 bytes)
 MSG_FILE_OFFER = 2  # payload: filesize (8) + transfer_id (16) + filename
-MSG_FILE_DATA = 3   # payload: the raw file content (whole file) - being
-                     # replaced by chunked transfer, kept for reference
+# (3 was MSG_FILE_DATA, an early whole-file-in-one-message design,
+# fully replaced by chunking below - removed as dead code, left as a
+# gap rather than renumbering everything else after it)
 MSG_FILE_CHUNK = 4  # payload: chunk index (4 bytes) + chunk hash (32 bytes)
                      # + chunk data (remaining bytes, ENCRYPTED)
 MSG_DONE = 5        # payload: SHA-256 hash of the ENTIRE (plaintext) file -

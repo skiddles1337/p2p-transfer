@@ -180,6 +180,37 @@ def get_contact_freshness(name: str, stale_after_days: float = DEFAULT_STALE_AFT
     }
 
 
+def rename_contact(engine, old_name: str, new_name: str) -> bool:
+    """
+    Actually rename a contact's real identity key, keeping
+    contacts.json AND the running engine's known_passphrases in sync -
+    contacts.rename_contact() alone only touches the saved file (same
+    class of gap as forget_contact fixed for removal). Without this
+    coordinating function, a running app would keep recognizing the
+    OLD name for incoming connections while displaying the new one
+    everywhere else - confusing and wrong.
+
+    For just giving someone a local nickname WITHOUT touching how
+    their connections are actually matched/authenticated, use
+    contacts.set_alias() instead - that's the safer, purely cosmetic
+    option and doesn't need this coordinating function at all.
+
+    Returns True if the rename happened, False if old_name didn't
+    exist or new_name was already taken by someone else.
+    """
+    contact = contacts_module.get_contact(old_name)
+    if contact is None:
+        return False
+
+    renamed = contacts_module.rename_contact(old_name, new_name)
+    if not renamed:
+        return False
+
+    engine.remove_known_passphrase(old_name)
+    engine.set_known_passphrase(new_name, contact["passphrase"])
+    return True
+
+
 def load_contacts_into_engine(engine) -> int:
     """
     Fixes Gap B: reads ALL saved contacts and registers each one's

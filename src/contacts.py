@@ -51,15 +51,85 @@ def add_contact(name: str, ip: str, port: int, passphrase: str) -> None:
     their IP changed, or just because it's been a while) naturally
     resets their staleness clock, with no separate "renew" action
     needed - the act of adding/updating IS the renewal.
+
+    Preserves any existing alias if this name was already a contact -
+    re-pairing (e.g. after their IP changed) shouldn't wipe out a
+    nickname you'd already set for them.
     """
     contacts = load_contacts()
+    existing_alias = contacts.get(name, {}).get("alias")
     contacts[name] = {
         "ip": ip,
         "port": port,
         "passphrase": passphrase,
         "paired_at": time.time(),
+        "alias": existing_alias,
     }
     save_contacts(contacts)
+
+
+def set_alias(name: str, alias: str | None) -> bool:
+    """
+    Set (or clear, with alias=None) a purely COSMETIC nickname for a
+    contact - never touches the underlying name used for actual
+    security matching (engine.known_passphrases stays keyed on the
+    original `name`, completely unaffected). This is the SAFE way to
+    just call someone something different in your own contact list,
+    with zero risk of breaking how their connections get authenticated.
+
+    Returns True if the contact existed and was updated, False
+    otherwise.
+    """
+    contacts = load_contacts()
+    if name not in contacts:
+        return False
+    contacts[name]["alias"] = alias
+    save_contacts(contacts)
+    return True
+
+
+def display_name(name: str) -> str:
+    """
+    The name to actually SHOW for a contact - their alias if one is
+    set, otherwise their original (self-asserted, from pairing) name.
+    Use this for anything user-facing; use the plain `name` itself
+    only when actually matching against engine state.
+    """
+    contact = get_contact(name)
+    if contact is None:
+        return name
+    return contact.get("alias") or name
+
+
+def rename_contact(old_name: str, new_name: str) -> bool:
+    """
+    Actually change a contact's real identity key - not just a
+    cosmetic alias (see set_alias for that, the safer option for "I
+    just want to call them something else"). This moves the contact
+    to a NEW key in contacts.json, preserving everything else (ip,
+    port, passphrase, paired_at, alias).
+
+    IMPORTANT: this does NOT touch engine.known_passphrases by itself -
+    callers must also update the running engine to match (see
+    pairing.rename_contact, which does both together atomically) or a
+    running app would still recognize the OLD name for incoming
+    connections while displaying the new one - exactly the kind of
+    data/engine-state mismatch bug this whole file's pattern exists to
+    prevent (see the Gap A/B/C notes in pairing.py).
+
+    Returns True if old_name existed and was renamed, False otherwise.
+    Returns False without changing anything if new_name already exists
+    (as a DIFFERENT contact) - refuses to silently overwrite someone else.
+    """
+    contacts = load_contacts()
+    if old_name not in contacts:
+        return False
+    if new_name in contacts and new_name != old_name:
+        return False
+
+    contacts[new_name] = contacts.pop(old_name)
+    save_contacts(contacts)
+    return True
 
 
 def remove_contact(name: str) -> bool:
