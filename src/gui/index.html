@@ -122,6 +122,13 @@
     .status-row.listening { color: var(--accent); }
     .status-row.offline { color: var(--text-dim); }
 
+    .status-row #listenToggleBtn {
+      margin-left: auto;
+      border: 1px solid var(--border);
+      border-radius: 2px;
+      padding: 2px 6px;
+    }
+
     .dot {
       width: 6px;
       height: 6px;
@@ -152,6 +159,14 @@
     }
 
     .btn-row .btn { margin-bottom: 0; }
+
+    .field-note {
+      font-size: 11px;
+      color: var(--accent);
+      font-family: 'IBM Plex Mono', monospace;
+      margin-top: 6px;
+      min-height: 14px;
+    }
 
     .nav {
       margin-top: 24px;
@@ -192,6 +207,21 @@
       margin: 0 0 18px;
     }
 
+    .section-header-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .section-header-row h2 { margin-bottom: 18px; }
+
+    .section-header-row .link-btn {
+      border: 1px solid var(--border);
+      border-radius: 2px;
+      padding: 4px 10px;
+      margin-bottom: 18px;
+    }
+
     .section { display: none; }
     .section.active { display: block; }
 
@@ -201,20 +231,12 @@
       padding: 20px 0;
     }
 
-    #offersDiv .offer-row {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-left: 2px solid var(--success);
+    .offer-prompt {
+      background: rgba(79, 195, 176, 0.06);
+      border: 1px solid var(--accent);
       border-radius: 3px;
       padding: 10px 14px;
-      margin-bottom: 8px;
-      font-size: 13px;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
     }
-
-    .offer-row .link-btn { font-size: 12px; margin-left: 10px; }
 
     .empty-note {
       color: var(--text-dim);
@@ -446,12 +468,13 @@
     <div class="field">
       <label>
         ip
-        <span class="spacer"></span>
         <span class="checkbox-inline">
           <input type="checkbox" id="ipAutoCheck" checked onchange="onIpAutoToggle()">
           auto
         </span>
         <button class="link-btn" onclick="refreshIp()">refresh</button>
+        <span class="spacer"></span>
+        <button class="link-btn" onclick="testPort()">test port</button>
       </label>
       <div class="ip-port-row">
         <input class="ip" id="myIp" readonly onblur="onIpBlur()">
@@ -467,6 +490,7 @@
     <div class="status-row offline" id="listenStatus">
       <div class="dot"></div>
       <span id="listenStatusText">not listening</span>
+      <button class="link-btn" id="listenToggleBtn" onclick="toggleListening()">start</button>
     </div>
 
     <div class="field">
@@ -477,6 +501,7 @@
       <button class="btn" onclick="doQuickShare()">quick share</button>
       <button class="btn" onclick="doConnect()">connect</button>
     </div>
+    <div class="field-note" id="quickShareStatus"></div>
 
     <div class="nav">
       <div class="nav-item active" onclick="showSection('connections', this)">Connections</div>
@@ -490,11 +515,11 @@
   <div class="main">
 
     <div class="section active" id="section-connections">
-      <h2>Connections</h2>
+      <div class="section-header-row">
+        <h2>Connections</h2>
+        <button class="link-btn danger" onclick="closeAllConnections()">close all</button>
+      </div>
       <div id="connectionsListDiv"><p class="empty-note">No active connections.</p></div>
-
-      <h2>Pending incoming offers</h2>
-      <div id="offersDiv"><p class="empty-note">No pending offers.</p></div>
 
       <details class="devpanel">
         <summary>Details / dev tools</summary>
@@ -583,7 +608,6 @@ function onEngineEvent(base64Payload) {
 
   if (event.type === "file_offer_received") {
     pendingOffers[event.offer_id] = event;
-    renderOffers();
   }
 
   if (event.type === "file_offer_answered" || event.type === "file_complete"
@@ -745,8 +769,12 @@ function buildConnectionCard(sessionId) {
   el.appendChild(header);
 
   if (card.handshakeState === "ok") {
+    const pendingOffer = findPendingOfferForSession(sessionId);
     const key = card.currentTransferId ? transferKey(sessionId, card.currentTransferId) : null;
-    if (key && transferMeta[key]) {
+
+    if (pendingOffer) {
+      el.appendChild(buildOfferPrompt(pendingOffer));
+    } else if (key && transferMeta[key]) {
       el.appendChild(buildTransferView(sessionId, card.currentTransferId));
     } else {
       el.appendChild(buildSendForm(sessionId));
@@ -754,6 +782,39 @@ function buildConnectionCard(sessionId) {
   }
 
   return el;
+}
+
+function findPendingOfferForSession(sessionId) {
+  return Object.values(pendingOffers).find(o => o.session_id === parseInt(sessionId));
+}
+
+function buildOfferPrompt(offer) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "offer-prompt";
+
+  const label = document.createElement("div");
+  label.className = "transfer-label";
+  label.textContent = `Incoming: '${offer.filename}' (${offer.filesize} bytes)`;
+  wrapper.appendChild(label);
+
+  const actions = document.createElement("div");
+  actions.className = "conn-card-actions";
+
+  const acceptBtn = document.createElement("button");
+  acceptBtn.className = "link-btn";
+  acceptBtn.textContent = "accept";
+  acceptBtn.onclick = () => respondToOffer(offer.offer_id, true);
+
+  const rejectBtn = document.createElement("button");
+  rejectBtn.className = "link-btn danger";
+  rejectBtn.textContent = "reject";
+  rejectBtn.onclick = () => respondToOffer(offer.offer_id, false);
+
+  actions.appendChild(acceptBtn);
+  actions.appendChild(rejectBtn);
+  wrapper.appendChild(actions);
+
+  return wrapper;
 }
 
 function buildTransferView(sessionId, transferId) {
@@ -955,18 +1016,6 @@ function buildContactRow(name, contact) {
     window.pywebview.api.set_contact_alias(name, alias || null).then(refreshContacts);
   };
 
-  const renameBtn = document.createElement("button");
-  renameBtn.className = "link-btn";
-  renameBtn.textContent = "rename";
-  renameBtn.onclick = () => {
-    const newName = prompt(`Rename '${name}' - this changes their actual identity key, not just a display nickname:`, name);
-    if (newName === null || newName === name) return;
-    window.pywebview.api.rename_contact(name, newName).then(success => {
-      if (!success) alert("Rename failed - that name may already be taken by someone else.");
-      refreshContacts();
-    });
-  };
-
   const removeBtn = document.createElement("button");
   removeBtn.className = "link-btn danger";
   removeBtn.textContent = "remove";
@@ -977,7 +1026,6 @@ function buildContactRow(name, contact) {
 
   actions.appendChild(connectBtn);
   actions.appendChild(aliasBtn);
-  actions.appendChild(renameBtn);
   actions.appendChild(removeBtn);
 
   row.appendChild(info);
@@ -993,40 +1041,10 @@ function logEvent(event) {
   div.scrollTop = div.scrollHeight;
 }
 
-function renderOffers() {
-  const div = document.getElementById("offersDiv");
-  const ids = Object.keys(pendingOffers);
-  if (ids.length === 0) {
-    div.innerHTML = '<p class="empty-note">No pending offers.</p>';
-    return;
-  }
-  div.innerHTML = "";
-  for (const id of ids) {
-    const o = pendingOffers[id];
-    const row = document.createElement("div");
-    row.className = "offer-row";
-    row.innerHTML = `<span>#${id} '${o.filename}' (${o.filesize} bytes) on session ${o.session_id}</span>`;
-
-    const acceptBtn = document.createElement("button");
-    acceptBtn.className = "link-btn";
-    acceptBtn.textContent = "accept";
-    acceptBtn.onclick = () => respondToOffer(id, true);
-
-    const rejectBtn = document.createElement("button");
-    rejectBtn.className = "link-btn danger";
-    rejectBtn.textContent = "reject";
-    rejectBtn.onclick = () => respondToOffer(id, false);
-
-    row.appendChild(acceptBtn);
-    row.appendChild(rejectBtn);
-    div.appendChild(row);
-  }
-}
-
 function respondToOffer(offerId, accept) {
   window.pywebview.api.respond_to_offer(parseInt(offerId), accept).then(() => {
     delete pendingOffers[offerId];
-    renderOffers();
+    renderConnections();
   });
 }
 
@@ -1078,12 +1096,30 @@ function refreshIp() {
   });
 }
 
+function testPort() {
+  // Deliberately manual/browser-based, not automated - see
+  // network_info.open_port_check_tool()'s own docstring for why.
+  window.pywebview.api.open_port_check_tool();
+}
+
 function doQuickShare() {
   const code = document.getElementById("pairingCode").value;
   window.pywebview.api.quick_share(code).then(result => {
     if (result.success) {
       document.getElementById("connectionBox").value = result.invite;
       refreshSnapshot();
+
+      const statusEl = document.getElementById("quickShareStatus");
+      navigator.clipboard.writeText(result.invite).then(() => {
+        statusEl.textContent = "copied to clipboard";
+        setTimeout(() => { statusEl.textContent = ""; }, 2500);
+      }).catch(() => {
+        // Clipboard write can fail (permissions, focus state) - the
+        // string is still visible in the box either way, so this
+        // isn't a dead end, just a quieter fallback.
+        statusEl.textContent = "couldn't auto-copy - select the text above manually";
+        setTimeout(() => { statusEl.textContent = ""; }, 4000);
+      });
     } else {
       alert("Quick share failed: " + result.error);
     }
@@ -1121,14 +1157,43 @@ function refreshSnapshot() {
 
     const statusRow = document.getElementById("listenStatus");
     const statusText = document.getElementById("listenStatusText");
+    const toggleBtn = document.getElementById("listenToggleBtn");
     if (snapshot.listening) {
       statusRow.className = "status-row listening";
       statusText.textContent = "listening :" + snapshot.listening_port;
+      toggleBtn.textContent = "stop";
     } else {
       statusRow.className = "status-row offline";
       statusText.textContent = "not listening";
+      toggleBtn.textContent = "start";
     }
   });
+}
+
+function toggleListening() {
+  window.pywebview.api.get_state_snapshot().then(snapshot => {
+    if (snapshot.listening) {
+      // Stopping the listener only affects NEW incoming connections -
+      // it does not touch sessions already connected, which keep
+      // running undisturbed. A separate, more drastic "close all"
+      // action exists for actually ending existing connections - see
+      // closeAllConnections() - deliberately kept apart so stopping
+      // the listener can never accidentally interrupt an in-progress
+      // transfer with an existing friend.
+      window.pywebview.api.stop_listening();
+    } else {
+      const port = parseInt(document.getElementById("myPort").value);
+      window.pywebview.api.start_listening(port);
+    }
+    setTimeout(refreshSnapshot, 200);
+  });
+}
+
+function closeAllConnections() {
+  const sessionIds = Object.keys(sessionCards);
+  if (sessionIds.length === 0) return;
+  if (!confirm(`Close all ${sessionIds.length} active connection(s)? Any in-progress transfers will be interrupted.`)) return;
+  sessionIds.forEach(sid => window.pywebview.api.close_session(parseInt(sid)));
 }
 
 function loadIdentity() {
