@@ -1209,12 +1209,23 @@ function buildContactRow(name, contact) {
   connectBtn.className = "link-btn";
   connectBtn.textContent = "connect";
   connectBtn.onclick = () => {
+    if (connectBtn.disabled) return;
+    connectBtn.disabled = true;
+    connectBtn.textContent = "connecting...";
+
     window.pywebview.api.connect_to_contact(name).then(result => {
       if (result.success) {
         refreshSnapshot();
-      } else {
+      } else if (!result.cooldown) {
+        // A genuine error (e.g. the contact was removed) - a cooldown
+        // rejection is expected/harmless from a quick repeated click
+        // and doesn't need an alarming popup for it.
         alert("Couldn't connect: " + result.error);
       }
+      setTimeout(() => {
+        connectBtn.disabled = false;
+        connectBtn.textContent = "connect";
+      }, 2000);
     });
   };
 

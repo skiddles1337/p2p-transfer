@@ -26,6 +26,7 @@ JSON-encodes each event, and calls push_to_frontend(json_string).
 
 import json
 import threading
+import time
 
 from engine import Engine
 import pairing
@@ -55,6 +56,12 @@ class Bridge:
         # engine/pairing layer, it's pywebview-specific, so it lives
         # here rather than being exposed as a plain command elsewhere).
         self._window = None
+
+        # name -> time.monotonic() of the last connect_to_contact()
+        # attempt - see connect_to_contact()'s own docstring for why
+        # this cooldown exists.
+        self._last_connect_attempt = {}
+        self.CONNECT_COOLDOWN_SECONDS = 10
 
         # Without this, a fresh Engine() has no memory of previously-
         # paired contacts - see pairing.load_contacts_into_engine's
@@ -175,15 +182,47 @@ class Bridge:
         fresh connection string). Reconnecting to someone you've
         already paired with needs no code at all - their real
         passphrase is already saved from the original pairing.
+
+        Two protections against creating redundant connections to the
+        same contact - both needed, for different reasons:
+
+        1. A short cooldown against rapid re-clicking. The underlying
+           TCP connect() can sit pending for a long time if the target
+           isn't actively refusing yet (common with NAT/router
+           behavior) - it doesn't fail instantly the way a clean
+           "nothing's listening" refusal would. Click "connect" several
+           times quickly and each click starts its own pending attempt,
+           with no session registered yet to check against - all of
+           which can then succeed in a sudden burst once the peer
+           finally starts listening. Reproduced and confirmed via
+           real-world use, not just theorized.
+        2. A check against sessions that are ALREADY fully connected -
+           one session already handles any number of files in either
+           direction, so there's no reason to open a second one to
+           someone you're already talking to.
         """
         contact = contacts_module.get_contact(name)
         if contact is None:
             return {"success": False, "error": f"No saved contact named '{name}'"}
+
+        now = time.monotonic()
+        last_attempt = self._last_connect_attempt.get(name, 0)
+        if now - last_attempt < self.CONNECT_COOLDOWN_SECONDS:
+            return {"success": False, "error": "Already attempting to connect - please wait a moment",
+                   "cooldown": True}
+        self._last_connect_attempt[name] = now
+
+        snapshot = self.engine.get_state_snapshot()
+        for session_info in snapshot["sessions"]:
+            if session_info["peer_name"] == name:
+                return {"success": True, "session_id": session_info["session_id"],
+                       "already_connected": True}
+
         try:
             session_id = self.engine.connect_to_peer(
                 contact["ip"], contact["port"], contact["passphrase"], peer_name=name
             )
-            return {"success": True, "session_id": session_id}
+            return {"success": True, "session_id": session_id, "already_connected": False}
         except OSError as e:
             return {"success": False, "error": str(e)}
 
