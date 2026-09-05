@@ -452,12 +452,13 @@ target is Windows first, via PyInstaller + Inno Setup.
   false-positive flags, purely from looking suspicious to heuristic
   scanners. `--onedir` (a folder, zipped for distribution) triggers
   this far less.
-- **Two genuinely different "ports," not to be conflated:** (1) the
-  actual P2P listening port, which needs router forwarding and
-  triggers a normal Windows Firewall prompt; (2) a local-only channel
-  between the Python engine and a future GUI frontend (websocket or
-  `pywebview`'s JS bridge), which never leaves 127.0.0.1 and never
-  triggers any firewall prompt at all.
+- **Only ONE port ever touches the network, full stop.** Easy to
+  conflate two different things: (1) the actual P2P listening port,
+  which needs router forwarding and triggers a normal Windows
+  Firewall prompt; (2) GUI↔engine communication, which — now that
+  we've confirmed `pywebview`'s in-process bridge works (see below) —
+  isn't a network channel at all, not even a loopback one. No firewall
+  prompt, no second port, nothing to conflate.
 - **WebView2 dependency check:** most modern Windows installs already
   have it, but not guaranteed (older/locked-down/LTSC installs might
   lack it) — `pywebview` can silently fall back to a legacy IE-based
@@ -493,9 +494,13 @@ directly from GUI code), `contacts.py`, `history.py`, `my_identity.py`,
 via `pywebview` for a native-feeling window) rather than a native
 Python GUI toolkit, specifically to support modern, animated visuals
 (e.g. a chunk-by-chunk progress grid) — browser engines GPU-accelerate
-this kind of rendering by default. The engine's event queue maps
-naturally onto this: push events to the frontend over a local
-websocket as they occur, rather than polling.
+this kind of rendering by default. Wiring decision (confirmed, not
+just planned — see below): use `pywebview`'s own built-in bridge
+rather than standing up a separate websocket server — a background
+thread drains the engine's event queue and calls `window.evaluate_js()`
+directly to push updates into the page as they arrive; JS calls back
+into Python via `window.pywebview.api`. No second server or extra
+moving part needed.
 
 **Decided UI behaviors:**
 - **Unverified incoming connection state:** `session_started` fires
@@ -536,8 +541,26 @@ Deprioritized: bandwidth throttling (needs real rate-limiting logic),
 minimize-to-tray. Explicitly excluded from ever exposing: chunk size,
 language/locale, log verbosity.
 
-**Not yet designed:** concrete layout, the exact websocket/JS-bridge
-wiring mechanism, and the connection-string UI flow's fine details.
+**Not yet designed:** concrete layout and the connection-string UI
+flow's fine details.
+
+**Confirmed via isolated experiment (`tests/gui_experiments/`), before
+any real GUI code was written:**
+- `window.evaluate_js()` can be safely called from a background thread
+  (not just the thread that called `webview.start()`) — this is what
+  makes the planned design work: the engine's event-draining thread
+  can directly push updates into the page as events arrive, with no
+  extra hand-off queue needed.
+- `pywebview`'s `window.events.closing` handler can genuinely cancel a
+  close (returning `False` blocks it) — confirms the planned
+  close-mid-transfer warning is buildable as designed, not just
+  theoretically possible per the library's docs.
+
+Both experiments are small, standalone scripts, kept as cheap
+regression checks in case a future `pywebview` upgrade changes this
+behavior — re-running either takes under a minute and immediately
+confirms whether the assumption still holds, without needing to
+rebuild the reasoning from scratch mid-debugging.
 
 ## 12. Known limitations & deliberately deferred features
 
