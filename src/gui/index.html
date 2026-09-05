@@ -317,6 +317,50 @@
       padding: 4px 8px;
     }
 
+    /* ---------- Contacts ---------- */
+
+    .contact-row {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      padding: 12px 16px;
+      margin-bottom: 10px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .contact-row .info { display: flex; flex-direction: column; gap: 3px; }
+
+    .contact-row .display-name { font-size: 14px; font-weight: 500; }
+
+    .contact-row .addr {
+      font-size: 11px;
+      color: var(--text-dim);
+      font-family: 'IBM Plex Mono', monospace;
+    }
+
+    .contact-row .stale-badge {
+      font-size: 10px;
+      font-family: 'IBM Plex Mono', monospace;
+      color: #D9B54A;
+      border: 1px solid #D9B54A;
+      border-radius: 2px;
+      padding: 1px 5px;
+      margin-left: 8px;
+    }
+
+    .contact-row .actions {
+      display: flex;
+      gap: 6px;
+    }
+
+    .contact-row .actions .link-btn {
+      border: 1px solid var(--border);
+      border-radius: 2px;
+      padding: 4px 8px;
+    }
+
     /* ---------- Dev/details panel ---------- */
 
     details.devpanel {
@@ -483,7 +527,7 @@
 
     <div class="section" id="section-contacts">
       <h2>Contacts</h2>
-      <p class="placeholder">Not built yet — planned: saved contact list, aliasing, renaming, staleness indicator.</p>
+      <div id="contactsListDiv"><p class="empty-note">No saved contacts yet.</p></div>
     </div>
 
     <div class="section" id="section-history">
@@ -527,6 +571,8 @@ function showSection(name, navEl) {
   document.getElementById("section-" + name).classList.add("active");
   document.querySelectorAll(".nav-item").forEach(el => el.classList.remove("active"));
   navEl.classList.add("active");
+
+  if (name === "contacts") refreshContacts();
 }
 
 function onEngineEvent(base64Payload) {
@@ -830,6 +876,113 @@ function buildSendForm(sessionId) {
   wrapper.appendChild(pathInput);
   wrapper.appendChild(sendBtn);
   return wrapper;
+}
+
+// ---------- Contacts ----------
+
+// Mirrors pairing.py's DEFAULT_STALE_AFTER_DAYS - computed client-side
+// directly from paired_at rather than calling get_contact_freshness()
+// once per contact (avoids N extra round-trips for a list). If the
+// Python-side default ever changes, this needs updating to match.
+const STALE_AFTER_DAYS = 30;
+
+function refreshContacts() {
+  window.pywebview.api.get_contacts().then(renderContactsList);
+}
+
+function renderContactsList(contactsDict) {
+  const div = document.getElementById("contactsListDiv");
+  const names = Object.keys(contactsDict);
+
+  if (names.length === 0) {
+    div.innerHTML = '<p class="empty-note">No saved contacts yet.</p>';
+    return;
+  }
+
+  div.innerHTML = "";
+  names.forEach(name => div.appendChild(buildContactRow(name, contactsDict[name])));
+}
+
+function buildContactRow(name, contact) {
+  const row = document.createElement("div");
+  row.className = "contact-row";
+
+  const info = document.createElement("div");
+  info.className = "info";
+
+  const displayName = document.createElement("span");
+  displayName.className = "display-name";
+  displayName.textContent = contact.alias || name;
+
+  const daysSince = contact.paired_at ? (Date.now() / 1000 - contact.paired_at) / 86400 : null;
+  const isStale = daysSince === null || daysSince > STALE_AFTER_DAYS;
+  if (isStale) {
+    const badge = document.createElement("span");
+    badge.className = "stale-badge";
+    badge.textContent = "needs re-pairing";
+    displayName.appendChild(badge);
+  }
+
+  const addr = document.createElement("span");
+  addr.className = "addr";
+  addr.textContent = `${contact.ip}:${contact.port}`;
+
+  info.appendChild(displayName);
+  info.appendChild(addr);
+
+  const actions = document.createElement("div");
+  actions.className = "actions";
+
+  const connectBtn = document.createElement("button");
+  connectBtn.className = "link-btn";
+  connectBtn.textContent = "connect";
+  connectBtn.onclick = () => {
+    window.pywebview.api.connect_to_contact(name).then(result => {
+      if (result.success) {
+        refreshSnapshot();
+      } else {
+        alert("Couldn't connect: " + result.error);
+      }
+    });
+  };
+
+  const aliasBtn = document.createElement("button");
+  aliasBtn.className = "link-btn";
+  aliasBtn.textContent = "alias";
+  aliasBtn.onclick = () => {
+    const alias = prompt(`Set a local nickname for '${name}' (purely cosmetic, doesn't affect the connection):`, contact.alias || "");
+    if (alias === null) return;
+    window.pywebview.api.set_contact_alias(name, alias || null).then(refreshContacts);
+  };
+
+  const renameBtn = document.createElement("button");
+  renameBtn.className = "link-btn";
+  renameBtn.textContent = "rename";
+  renameBtn.onclick = () => {
+    const newName = prompt(`Rename '${name}' - this changes their actual identity key, not just a display nickname:`, name);
+    if (newName === null || newName === name) return;
+    window.pywebview.api.rename_contact(name, newName).then(success => {
+      if (!success) alert("Rename failed - that name may already be taken by someone else.");
+      refreshContacts();
+    });
+  };
+
+  const removeBtn = document.createElement("button");
+  removeBtn.className = "link-btn danger";
+  removeBtn.textContent = "remove";
+  removeBtn.onclick = () => {
+    if (!confirm(`Remove '${name}'? They won't be able to connect to you afterward until re-paired.`)) return;
+    window.pywebview.api.remove_contact(name).then(refreshContacts);
+  };
+
+  actions.appendChild(connectBtn);
+  actions.appendChild(aliasBtn);
+  actions.appendChild(renameBtn);
+  actions.appendChild(removeBtn);
+
+  row.appendChild(info);
+  row.appendChild(actions);
+  return row;
 }
 
 function logEvent(event) {

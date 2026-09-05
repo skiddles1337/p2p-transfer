@@ -131,6 +131,26 @@ class Bridge:
     def get_contacts(self):
         return contacts_module.load_contacts()
 
+    def connect_to_contact(self, name):
+        """
+        Connect to an ALREADY-saved contact directly - deliberately
+        separate from quick_share/paste_and_connect, which are both
+        for FIRST-TIME pairing (needing a pairing code to decrypt a
+        fresh connection string). Reconnecting to someone you've
+        already paired with needs no code at all - their real
+        passphrase is already saved from the original pairing.
+        """
+        contact = contacts_module.get_contact(name)
+        if contact is None:
+            return {"success": False, "error": f"No saved contact named '{name}'"}
+        try:
+            session_id = self.engine.connect_to_peer(
+                contact["ip"], contact["port"], contact["passphrase"], peer_name=name
+            )
+            return {"success": True, "session_id": session_id}
+        except OSError as e:
+            return {"success": False, "error": str(e)}
+
     def remove_contact(self, name):
         return pairing.forget_contact(self.engine, name)
 
