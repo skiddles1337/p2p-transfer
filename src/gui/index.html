@@ -552,6 +552,18 @@ function onEngineEvent(base64Payload) {
 // ---------- Connection card event handling (additive, separate from
 // the existing dev-panel/offers logic above) ----------
 
+function transferKey(sessionId, transferId) {
+  // Transfer state (direction, stats) is inherently a PER-SESSION fact,
+  // not a global one - "am I sending or receiving this" only makes
+  // sense from one particular session's perspective. Keying by
+  // transfer_id alone breaks specifically when a single page is
+  // watching BOTH sides of the same transfer (e.g. a self-connect
+  // test), since the sending session's and receiving session's events
+  // would collide on the same shared object - reproduced and fixed
+  // after exactly that scenario surfaced it in testing.
+  return sessionId + ":" + transferId;
+}
+
 function handleConnectionCardEvent(event) {
   if (event.type === "session_started") {
     sessionCards[event.session_id] = {
@@ -581,28 +593,31 @@ function handleConnectionCardEvent(event) {
     renderConnections();
 
   } else if (event.type === "file_offer_received") {
-    ensureTransferMeta(event.transfer_id, event.session_id, event.filename, "incoming");
+    const key = transferKey(event.session_id, event.transfer_id);
+    ensureTransferMeta(key, event.session_id, event.transfer_id, event.filename, "incoming");
     renderConnections();
 
   } else if (event.type === "file_offer_answered") {
     if (event.accepted) {
-      ensureTransferMeta(event.transfer_id, event.session_id, event.filename, "outgoing");
+      const key = transferKey(event.session_id, event.transfer_id);
+      ensureTransferMeta(key, event.session_id, event.transfer_id, event.filename, "outgoing");
       renderConnections();
     }
 
   } else if (event.type === "chunk_progress") {
-    if (!chunkStatus[event.transfer_id]) {
-      chunkStatus[event.transfer_id] = new Uint8Array(event.total_chunks);
+    const key = transferKey(event.session_id, event.transfer_id);
+    if (!chunkStatus[key]) {
+      chunkStatus[key] = new Uint8Array(event.total_chunks);
       // Defensive fallback - chunk_progress arriving before we ever saw
       // the offer/answered event shouldn't normally happen, but this
       // keeps rendering from breaking if it somehow does.
-      ensureTransferMeta(event.transfer_id, event.session_id, "(unknown)",
+      ensureTransferMeta(key, event.session_id, event.transfer_id, "(unknown)",
                           event.status === "sent" ? "outgoing" : "incoming");
     }
-    const arr = chunkStatus[event.transfer_id];
+    const arr = chunkStatus[key];
     arr[event.chunk_index] = (event.status === "failed") ? 2 : 1;
 
-    const meta = transferMeta[event.transfer_id];
+    const meta = transferMeta[key];
     meta.bytesPerSecond = event.bytes_per_second;
     meta.etaSeconds = event.eta_seconds;
     meta.bytesTransferred = event.bytes_transferred;
@@ -610,7 +625,8 @@ function handleConnectionCardEvent(event) {
     renderConnections();
 
   } else if (event.type === "file_complete") {
-    const meta = transferMeta[event.transfer_id];
+    const key = transferKey(event.session_id, event.transfer_id);
+    const meta = transferMeta[key];
     if (meta) {
       meta.finished = true;
       meta.success = event.success;
@@ -619,16 +635,16 @@ function handleConnectionCardEvent(event) {
   }
 }
 
-function ensureTransferMeta(transferId, sessionId, filename, direction) {
-  if (!transferMeta[transferId]) {
-    transferMeta[transferId] = {
-      sessionId, filename, direction, expanded: false,
+function ensureTransferMeta(key, sessionId, transferId, filename, direction) {
+  if (!transferMeta[key]) {
+    transferMeta[key] = {
+      sessionId, transferId, filename, direction, expanded: false,
       bytesPerSecond: null, etaSeconds: null,
       bytesTransferred: 0, totalBytes: 0,
       finished: false, success: null,
     };
   } else if (filename !== "(unknown)") {
-    transferMeta[transferId].filename = filename;
+    transferMeta[key].filename = filename;
   }
   const card = sessionCards[sessionId];
   if (card) card.currentTransferId = transferId;
@@ -683,7 +699,8 @@ function buildConnectionCard(sessionId) {
   el.appendChild(header);
 
   if (card.handshakeState === "ok") {
-    if (card.currentTransferId && transferMeta[card.currentTransferId]) {
+    const key = card.currentTransferId ? transferKey(sessionId, card.currentTransferId) : null;
+    if (key && transferMeta[key]) {
       el.appendChild(buildTransferView(sessionId, card.currentTransferId));
     } else {
       el.appendChild(buildSendForm(sessionId));
@@ -694,7 +711,8 @@ function buildConnectionCard(sessionId) {
 }
 
 function buildTransferView(sessionId, transferId) {
-  const meta = transferMeta[transferId];
+  const key = transferKey(sessionId, transferId);
+  const meta = transferMeta[key];
   const wrapper = document.createElement("div");
 
   const label = document.createElement("div");
@@ -706,7 +724,7 @@ function buildTransferView(sessionId, transferId) {
   label.textContent = `${verb} ${meta.filename} ${statusWord}`;
   wrapper.appendChild(label);
 
-  const { container: grid, grouped, boxCount } = renderChunkGrid(transferId);
+  const { container: grid, grouped, boxCount } = renderChunkGrid(key);
   wrapper.appendChild(grid);
 
   const totalChunks = grid.dataset.totalChunks;
@@ -742,6 +760,9 @@ function buildTransferView(sessionId, transferId) {
     const cancelBtn = document.createElement("button");
     cancelBtn.className = "link-btn danger";
     cancelBtn.textContent = "cancel";
+    // Backend cancel_transfer() wants the REAL transfer_id (hex string
+    // from the wire protocol), never our internal session:transferId
+    // display key - passing transferId here, not key, is deliberate.
     cancelBtn.onclick = () => window.pywebview.api.cancel_transfer(parseInt(sessionId), transferId);
     actions.appendChild(cancelBtn);
     wrapper.appendChild(actions);
@@ -750,9 +771,9 @@ function buildTransferView(sessionId, transferId) {
   return wrapper;
 }
 
-function renderChunkGrid(transferId) {
-  const meta = transferMeta[transferId];
-  const statusArr = chunkStatus[transferId];
+function renderChunkGrid(key) {
+  const meta = transferMeta[key];
+  const statusArr = chunkStatus[key];
   const total = statusArr ? statusArr.length : 0;
   meta.totalChunks = total;
 
