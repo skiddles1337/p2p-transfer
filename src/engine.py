@@ -814,33 +814,65 @@ class Engine:
         chunk_index = 0
         cancelled = False
 
-        with open(filepath, "rb") as f:
-            while True:
-                if transfer.cancel_event.is_set():
-                    cancelled = True
-                    break
+        # This is guarded the same way as the initial filename/filesize
+        # lookup above, for the same reason: the file could become
+        # unreadable AFTER the offer was already accepted (deleted,
+        # a USB drive pulled mid-read, etc.), and without this guard
+        # that failure would propagate all the way up to
+        # _sender_loop's except clause, silently killing the
+        # session's ability to send anything else for the rest of its
+        # lifetime - exactly the same bug as the initial lookup, just
+        # triggered partway through instead of at the very start.
+        #
+        # We don't need to distinguish "local file problem" from "the
+        # connection itself died" here - the READER thread independently
+        # and reliably detects a genuinely dead connection on its own
+        # (via its own recv_message() call failing) and triggers proper
+        # session cleanup regardless of what happens on the sending
+        # side. So it's safe to handle any failure here the same way:
+        # tell the peer we're giving up on this specific transfer (best
+        # effort - this send might also fail if the connection really
+        # is dead, which is fine, the reader thread will still notice
+        # separately), report it, and let this session keep running.
+        try:
+            with open(filepath, "rb") as f:
+                while True:
+                    if transfer.cancel_event.is_set():
+                        cancelled = True
+                        break
 
-                chunk = f.read(CHUNK_SIZE)
-                if chunk == b"":
-                    break
+                    chunk = f.read(CHUNK_SIZE)
+                    if chunk == b"":
+                        break
 
-                whole_file_hasher.update(chunk)
-                chunk_hash = hashlib.sha256(chunk).digest()
-                encrypted_chunk = session.cipher.encrypt(chunk)
+                    whole_file_hasher.update(chunk)
+                    chunk_hash = hashlib.sha256(chunk).digest()
+                    encrypted_chunk = session.cipher.encrypt(chunk)
 
-                chunk_payload = pack_file_chunk(chunk_index, chunk_hash, encrypted_chunk)
-                self._send(session, MSG_FILE_CHUNK, chunk_payload)
+                    chunk_payload = pack_file_chunk(chunk_index, chunk_hash, encrypted_chunk)
+                    self._send(session, MSG_FILE_CHUNK, chunk_payload)
 
-                transfer.bytes_sent += len(chunk)
-                bytes_per_second, eta_seconds = _compute_rate_and_eta(
-                    transfer.start_time, transfer.bytes_sent, filesize
-                )
-                self._emit("chunk_progress", session_id=session.session_id,
-                           transfer_id=transfer_id.hex(), chunk_index=chunk_index,
-                           total_chunks=transfer.total_chunks, status="sent",
-                           bytes_transferred=transfer.bytes_sent, total_bytes=filesize,
-                           bytes_per_second=bytes_per_second, eta_seconds=eta_seconds)
-                chunk_index += 1
+                    transfer.bytes_sent += len(chunk)
+                    bytes_per_second, eta_seconds = _compute_rate_and_eta(
+                        transfer.start_time, transfer.bytes_sent, filesize
+                    )
+                    self._emit("chunk_progress", session_id=session.session_id,
+                               transfer_id=transfer_id.hex(), chunk_index=chunk_index,
+                               total_chunks=transfer.total_chunks, status="sent",
+                               bytes_transferred=transfer.bytes_sent, total_bytes=filesize,
+                               bytes_per_second=bytes_per_second, eta_seconds=eta_seconds)
+                    chunk_index += 1
+
+        except OSError as e:
+            self._emit("log", message=f"Send failed partway through '{filename}': {e}")
+            try:
+                self._send(session, MSG_CANCEL, transfer_id)
+            except OSError:
+                pass  # connection's probably dead too - the reader thread will notice
+            self._emit("file_complete", session_id=session.session_id,
+                       transfer_id=transfer_id.hex(), success=False, detail=str(e))
+            session.active_outgoing = None
+            return
 
         if cancelled:
             self._send(session, MSG_CANCEL, transfer_id)
