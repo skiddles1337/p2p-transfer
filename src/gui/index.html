@@ -238,6 +238,17 @@
       padding: 10px 14px;
     }
 
+    .finished-summary {
+      background: var(--surface-raised);
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      padding: 10px 14px;
+      margin-bottom: 12px;
+    }
+
+    .finished-summary .conn-card-header { margin-bottom: 8px; }
+    .finished-summary .chunk-grid { margin-bottom: 0; }
+
     .empty-note {
       color: var(--text-dim);
       font-size: 13px;
@@ -797,10 +808,11 @@ function buildConnectionCard(sessionId) {
       // Either no transfer has happened yet on this card, or the most
       // recent one already finished - either way, a fresh send form
       // needs to be available, not permanently blocked by whatever
-      // the last transfer was. If one DID just finish, show a brief
-      // summary of it first so the confirmation isn't lost.
+      // the last transfer was. A finished transfer's summary is
+      // PERSISTENT here - it stays until manually dismissed (or until
+      // a new transfer replaces it), not auto-cleared.
       if (meta && meta.finished) {
-        el.appendChild(buildFinishedSummary(meta));
+        el.appendChild(buildFinishedSummary(sessionId, card.currentTransferId));
       }
       el.appendChild(buildSendForm(sessionId));
     }
@@ -809,13 +821,46 @@ function buildConnectionCard(sessionId) {
   return el;
 }
 
-function buildFinishedSummary(meta) {
-  const div = document.createElement("div");
-  div.className = "transfer-label";
+function buildFinishedSummary(sessionId, transferId) {
+  const key = transferKey(sessionId, transferId);
+  const meta = transferMeta[key];
+
+  const wrapper = document.createElement("div");
+  wrapper.className = "finished-summary";
+
+  const labelRow = document.createElement("div");
+  labelRow.className = "conn-card-header";
+
+  const label = document.createElement("span");
+  label.className = "transfer-label";
+  label.style.marginBottom = "0";
   const verb = meta.direction === "outgoing" ? "Sent" : "Received";
   const word = meta.success ? "done" : "failed/cancelled";
-  div.textContent = `Last: ${verb} ${meta.filename} — ${word}`;
-  return div;
+  label.textContent = `${verb} ${meta.filename} — ${word}`;
+
+  const dismissBtn = document.createElement("button");
+  dismissBtn.className = "close";
+  dismissBtn.innerHTML = "&times;";
+  dismissBtn.title = "Dismiss";
+  dismissBtn.onclick = () => {
+    // Only clears THIS transfer's record - if a card was somehow
+    // showing something else by the time this is clicked, don't
+    // touch it.
+    delete transferMeta[key];
+    delete chunkStatus[key];
+    const card = sessionCards[sessionId];
+    if (card && card.currentTransferId === transferId) card.currentTransferId = null;
+    renderConnections();
+  };
+
+  labelRow.appendChild(label);
+  labelRow.appendChild(dismissBtn);
+  wrapper.appendChild(labelRow);
+
+  const { container: grid } = renderChunkGrid(key);
+  wrapper.appendChild(grid);
+
+  return wrapper;
 }
 
 
