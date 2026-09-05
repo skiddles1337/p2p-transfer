@@ -221,6 +221,102 @@
       font-size: 13px;
     }
 
+    /* ---------- Real connection cards ---------- */
+
+    .conn-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      padding: 14px 18px;
+      margin-bottom: 14px;
+    }
+
+    .conn-card.active { border-left: 2px solid var(--accent); }
+    .conn-card.pending { opacity: 0.7; }
+    .conn-card.rejected { border-left: 2px solid var(--danger); opacity: 0.7; }
+
+    .conn-card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 10px;
+    }
+
+    .conn-card-header .peer-name {
+      font-size: 14px;
+      font-weight: 500;
+    }
+
+    .conn-card-header .peer-name.pending,
+    .conn-card-header .peer-name.rejected {
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 12px;
+      color: var(--text-dim);
+    }
+
+    .conn-card-header .close {
+      color: var(--text-dim);
+      cursor: pointer;
+      font-size: 15px;
+      background: none;
+      border: none;
+    }
+
+    .transfer-label {
+      font-size: 12px;
+      color: var(--text-dim);
+      margin-bottom: 8px;
+      font-family: 'IBM Plex Mono', monospace;
+    }
+
+    .chunk-grid {
+      display: grid;
+      grid-template-columns: repeat(30, 1fr);
+      gap: 3px;
+      max-width: 480px;
+      margin-bottom: 8px;
+    }
+
+    .chunk-box {
+      aspect-ratio: 1;
+      border-radius: 1px;
+      background: var(--border);
+    }
+
+    .chunk-box.done { background: var(--success); }
+    .chunk-box.failed { background: var(--danger); }
+
+    .grouped-note {
+      font-size: 10px;
+      color: var(--text-dim);
+      font-family: 'IBM Plex Mono', monospace;
+      margin-bottom: 8px;
+    }
+
+    .transfer-stats {
+      display: flex;
+      gap: 14px;
+      font-size: 11px;
+      color: var(--text-dim);
+      font-family: 'IBM Plex Mono', monospace;
+      margin-bottom: 10px;
+    }
+
+    .conn-card .inline-row {
+      margin-bottom: 0;
+    }
+
+    .conn-card-actions {
+      display: flex;
+      gap: 8px;
+    }
+
+    .conn-card-actions .link-btn {
+      border: 1px solid var(--border);
+      border-radius: 2px;
+      padding: 4px 8px;
+    }
+
     /* ---------- Dev/details panel ---------- */
 
     details.devpanel {
@@ -351,8 +447,7 @@
 
     <div class="section active" id="section-connections">
       <h2>Connections</h2>
-      <p class="placeholder">Real session cards (with the live chunk grid) aren't built yet -
-        the panel below is a temporary developer view standing in for them.</p>
+      <div id="connectionsListDiv"><p class="empty-note">No active connections.</p></div>
 
       <h2>Pending incoming offers</h2>
       <div id="offersDiv"><p class="empty-note">No pending offers.</p></div>
@@ -411,6 +506,22 @@
 <script>
 let pendingOffers = {};
 
+// ---------- Real connection cards + live chunk grid state ----------
+// sessionCards: session_id -> {peerAddr, peerName, handshakeState, currentTransferId}
+// transferMeta: transfer_id -> {sessionId, totalChunks, filename, direction,
+//                                expanded, bytesPerSecond, etaSeconds,
+//                                bytesTransferred, totalBytes, finished, success}
+// chunkStatus:  transfer_id -> Uint8Array (0 pending, 1 done, 2 failed) - the
+//               actual source of truth for the grid; box rendering at any
+//               resolution is always DERIVED fresh from this, so toggling
+//               collapsed/expanded is just a re-render, never a data change.
+let sessionCards = {};
+let transferMeta = {};
+let chunkStatus = {};
+
+const COLLAPSED_BOXES = 20;
+const EXPANDED_CAP = 300;
+
 function showSection(name, navEl) {
   document.querySelectorAll(".section").forEach(el => el.classList.remove("active"));
   document.getElementById("section-" + name).classList.add("active");
@@ -434,6 +545,270 @@ function onEngineEvent(base64Payload) {
       || event.type === "handshake_result") {
     refreshSnapshot();
   }
+
+  handleConnectionCardEvent(event);
+}
+
+// ---------- Connection card event handling (additive, separate from
+// the existing dev-panel/offers logic above) ----------
+
+function handleConnectionCardEvent(event) {
+  if (event.type === "session_started") {
+    sessionCards[event.session_id] = {
+      peerAddr: event.peer_addr, peerName: null,
+      handshakeState: "pending", currentTransferId: null,
+    };
+    renderConnections();
+
+  } else if (event.type === "handshake_result") {
+    const card = sessionCards[event.session_id];
+    if (!card) return;
+    if (event.success) {
+      card.handshakeState = "ok";
+      card.peerName = event.peer_name;
+      renderConnections();
+    } else {
+      card.handshakeState = "rejected";
+      renderConnections();
+      setTimeout(() => {
+        delete sessionCards[event.session_id];
+        renderConnections();
+      }, 2500);
+    }
+
+  } else if (event.type === "session_closed") {
+    delete sessionCards[event.session_id];
+    renderConnections();
+
+  } else if (event.type === "file_offer_received") {
+    ensureTransferMeta(event.transfer_id, event.session_id, event.filename, "incoming");
+    renderConnections();
+
+  } else if (event.type === "file_offer_answered") {
+    if (event.accepted) {
+      ensureTransferMeta(event.transfer_id, event.session_id, event.filename, "outgoing");
+      renderConnections();
+    }
+
+  } else if (event.type === "chunk_progress") {
+    if (!chunkStatus[event.transfer_id]) {
+      chunkStatus[event.transfer_id] = new Uint8Array(event.total_chunks);
+      // Defensive fallback - chunk_progress arriving before we ever saw
+      // the offer/answered event shouldn't normally happen, but this
+      // keeps rendering from breaking if it somehow does.
+      ensureTransferMeta(event.transfer_id, event.session_id, "(unknown)",
+                          event.status === "sent" ? "outgoing" : "incoming");
+    }
+    const arr = chunkStatus[event.transfer_id];
+    arr[event.chunk_index] = (event.status === "failed") ? 2 : 1;
+
+    const meta = transferMeta[event.transfer_id];
+    meta.bytesPerSecond = event.bytes_per_second;
+    meta.etaSeconds = event.eta_seconds;
+    meta.bytesTransferred = event.bytes_transferred;
+    meta.totalBytes = event.total_bytes;
+    renderConnections();
+
+  } else if (event.type === "file_complete") {
+    const meta = transferMeta[event.transfer_id];
+    if (meta) {
+      meta.finished = true;
+      meta.success = event.success;
+    }
+    renderConnections();
+  }
+}
+
+function ensureTransferMeta(transferId, sessionId, filename, direction) {
+  if (!transferMeta[transferId]) {
+    transferMeta[transferId] = {
+      sessionId, filename, direction, expanded: false,
+      bytesPerSecond: null, etaSeconds: null,
+      bytesTransferred: 0, totalBytes: 0,
+      finished: false, success: null,
+    };
+  } else if (filename !== "(unknown)") {
+    transferMeta[transferId].filename = filename;
+  }
+  const card = sessionCards[sessionId];
+  if (card) card.currentTransferId = transferId;
+}
+
+function renderConnections() {
+  const div = document.getElementById("connectionsListDiv");
+  const ids = Object.keys(sessionCards);
+
+  if (ids.length === 0) {
+    div.innerHTML = '<p class="empty-note">No active connections.</p>';
+    return;
+  }
+
+  div.innerHTML = "";
+  for (const sessionId of ids) {
+    div.appendChild(buildConnectionCard(sessionId));
+  }
+}
+
+function buildConnectionCard(sessionId) {
+  const card = sessionCards[sessionId];
+  const el = document.createElement("div");
+  el.className = "conn-card " + (
+    card.handshakeState === "pending" ? "pending" :
+    card.handshakeState === "rejected" ? "rejected" : "active"
+  );
+
+  const header = document.createElement("div");
+  header.className = "conn-card-header";
+
+  const nameSpan = document.createElement("span");
+  if (card.handshakeState === "ok") {
+    nameSpan.className = "peer-name";
+    nameSpan.textContent = card.peerName;
+  } else if (card.handshakeState === "rejected") {
+    nameSpan.className = "peer-name rejected";
+    nameSpan.textContent = `Unknown (${card.peerAddr[0]}) — rejected`;
+  } else {
+    nameSpan.className = "peer-name pending";
+    nameSpan.textContent = `Unknown (${card.peerAddr[0]}) — verifying...`;
+  }
+  header.appendChild(nameSpan);
+
+  if (card.handshakeState !== "pending") {
+    const closeBtn = document.createElement("button");
+    closeBtn.className = "close";
+    closeBtn.innerHTML = "&times;";
+    closeBtn.onclick = () => window.pywebview.api.close_session(parseInt(sessionId));
+    header.appendChild(closeBtn);
+  }
+  el.appendChild(header);
+
+  if (card.handshakeState === "ok") {
+    if (card.currentTransferId && transferMeta[card.currentTransferId]) {
+      el.appendChild(buildTransferView(sessionId, card.currentTransferId));
+    } else {
+      el.appendChild(buildSendForm(sessionId));
+    }
+  }
+
+  return el;
+}
+
+function buildTransferView(sessionId, transferId) {
+  const meta = transferMeta[transferId];
+  const wrapper = document.createElement("div");
+
+  const label = document.createElement("div");
+  label.className = "transfer-label";
+  const verb = meta.direction === "outgoing" ? "Sending" : "Receiving";
+  const statusWord = meta.finished
+    ? (meta.success ? "— done" : "— failed/cancelled")
+    : "";
+  label.textContent = `${verb} ${meta.filename} ${statusWord}`;
+  wrapper.appendChild(label);
+
+  const { container: grid, grouped, boxCount } = renderChunkGrid(transferId);
+  wrapper.appendChild(grid);
+
+  const totalChunks = grid.dataset.totalChunks;
+  if (grouped) {
+    const note = document.createElement("div");
+    note.className = "grouped-note";
+    note.textContent = `showing ${boxCount} of ${totalChunks} chunks, grouped`;
+    wrapper.appendChild(note);
+  }
+
+  if (meta.totalChunks > COLLAPSED_BOXES) {
+    const toggle = document.createElement("button");
+    toggle.className = "link-btn";
+    toggle.textContent = meta.expanded ? "collapse" : "expand";
+    toggle.onclick = () => {
+      meta.expanded = !meta.expanded;
+      renderConnections();
+    };
+    wrapper.appendChild(toggle);
+  }
+
+  const stats = document.createElement("div");
+  stats.className = "transfer-stats";
+  const pct = meta.totalBytes ? Math.round((meta.bytesTransferred / meta.totalBytes) * 100) : 0;
+  const rate = meta.bytesPerSecond ? (meta.bytesPerSecond / 1_000_000).toFixed(2) + " MB/s" : "calculating...";
+  const eta = meta.etaSeconds != null ? Math.round(meta.etaSeconds) + "s remaining" : "";
+  stats.innerHTML = `<span>${pct}%</span><span>${rate}</span><span>${eta}</span>`;
+  wrapper.appendChild(stats);
+
+  if (!meta.finished) {
+    const actions = document.createElement("div");
+    actions.className = "conn-card-actions";
+    const cancelBtn = document.createElement("button");
+    cancelBtn.className = "link-btn danger";
+    cancelBtn.textContent = "cancel";
+    cancelBtn.onclick = () => window.pywebview.api.cancel_transfer(parseInt(sessionId), transferId);
+    actions.appendChild(cancelBtn);
+    wrapper.appendChild(actions);
+  }
+
+  return wrapper;
+}
+
+function renderChunkGrid(transferId) {
+  const meta = transferMeta[transferId];
+  const statusArr = chunkStatus[transferId];
+  const total = statusArr ? statusArr.length : 0;
+  meta.totalChunks = total;
+
+  const boxCount = Math.max(1, meta.expanded
+    ? Math.min(total, EXPANDED_CAP)
+    : Math.min(total, COLLAPSED_BOXES));
+  const grouped = boxCount < total;
+
+  const container = document.createElement("div");
+  container.className = "chunk-grid";
+  container.dataset.totalChunks = total;
+
+  if (!statusArr) return { container, grouped: false, boxCount: 0 };
+
+  for (let b = 0; b < boxCount; b++) {
+    const startIdx = Math.floor(b * total / boxCount);
+    const endIdx = Math.floor((b + 1) * total / boxCount);
+    let done = 0, failed = 0;
+    for (let i = startIdx; i < endIdx; i++) {
+      if (statusArr[i] === 1) done++;
+      else if (statusArr[i] === 2) failed++;
+    }
+    const rangeTotal = Math.max(1, endIdx - startIdx);
+
+    const box = document.createElement("div");
+    box.className = "chunk-box";
+    if (failed > 0) {
+      box.classList.add("failed");
+    } else if (done === rangeTotal) {
+      box.classList.add("done");
+    } else if (done > 0) {
+      const pct = Math.round((done / rangeTotal) * 100);
+      box.style.background = `linear-gradient(to right, var(--success) ${pct}%, var(--border) ${pct}%)`;
+    }
+    container.appendChild(box);
+  }
+
+  return { container, grouped, boxCount };
+}
+
+function buildSendForm(sessionId) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "inline-row";
+
+  const pathInput = document.createElement("input");
+  pathInput.placeholder = "file path";
+  pathInput.style.flex = "1";
+
+  const sendBtn = document.createElement("button");
+  sendBtn.className = "link-btn";
+  sendBtn.textContent = "send";
+  sendBtn.onclick = () => window.pywebview.api.send_file(parseInt(sessionId), pathInput.value);
+
+  wrapper.appendChild(pathInput);
+  wrapper.appendChild(sendBtn);
+  return wrapper;
 }
 
 function logEvent(event) {

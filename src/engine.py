@@ -24,8 +24,8 @@ EVENTS (dicts pulled from engine.event_queue, each with a "type"):
     log                 {message}
     session_started     {session_id, peer_addr, direction}
     handshake_result    {session_id, success, reason}
-    file_offer_received {session_id, offer_id, filename, filesize}
-    file_offer_answered {session_id, filename, accepted}
+    file_offer_received {session_id, offer_id, filename, filesize, transfer_id}
+    file_offer_answered {session_id, filename, accepted, transfer_id}
     chunk_progress      {session_id, transfer_id, chunk_index,
                           total_chunks, status, bytes_transferred,
                           total_bytes, bytes_per_second, eta_seconds}
@@ -502,7 +502,8 @@ class Engine:
             }
 
         self._emit("file_offer_received", session_id=session.session_id,
-                   offer_id=offer_id, filename=filename, filesize=filesize)
+                   offer_id=offer_id, filename=filename, filesize=filesize,
+                   transfer_id=transfer_id.hex())
 
         # This wait is a DIFFERENT kind of blocking than the old nested
         # receive loop was: we're waiting on a human decision, not
@@ -517,7 +518,7 @@ class Engine:
 
         self._send(session, MSG_FILE_ACCEPT if accept else MSG_FILE_REJECT, b"")
         self._emit("file_offer_answered", session_id=session.session_id,
-                   filename=filename, accepted=accept)
+                   filename=filename, accepted=accept, transfer_id=transfer_id.hex())
 
         if accept:
             safe_filename = sanitize_filename(filename)
@@ -821,12 +822,12 @@ class Engine:
 
         if not decision.result:
             self._emit("file_offer_answered", session_id=session.session_id,
-                       filename=filename, accepted=False)
+                       filename=filename, accepted=False, transfer_id=transfer_id.hex())
             session.active_outgoing = None
             return
 
         self._emit("file_offer_answered", session_id=session.session_id,
-                   filename=filename, accepted=True)
+                   filename=filename, accepted=True, transfer_id=transfer_id.hex())
 
         whole_file_hasher = hashlib.sha256()
         chunk_index = 0
