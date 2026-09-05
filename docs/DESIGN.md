@@ -600,20 +600,23 @@ rebuild the reasoning from scratch mid-debugging.
   supports this without changes.
 - No peer folder browsing/requesting — a bigger feature needing its
   own permission model.
-- **Folder drag-and-drop is deliberately deferred** — dropping a
-  folder onto a connection card should eventually prompt "zip this
-  folder first, or send its contents as individual files?" but isn't
-  built yet. Single-file drag-and-drop IS implemented, with a real
-  caveat: it relies on a dropped file's `.path` property, which
-  standard web security does not guarantee is populated (this is
-  usually blocked for the same reason a browser `<input type=file>`
-  can't return a real path) — whether pywebview's WebView2 backend
-  exposes it is genuinely unconfirmed and needs real-machine testing,
-  unlike everything else in this codebase. The native OS file picker
-  (`Bridge.pick_files()`, via `pywebview`'s `create_file_dialog`) is
-  the guaranteed-working alternative regardless of how drag-and-drop
-  turns out, and sends every selected file immediately rather than
-  just filling a path field.
+- **Drag-and-drop file paths: confirmed NOT supported** on this app's
+  actual target platform (Windows, `pywebview`'s WebView2 backend) —
+  tested on a real machine, not just suspected. Removed entirely
+  rather than left in as dead code that always fails with an error;
+  the native OS file picker (`Bridge.pick_files()`, via `pywebview`'s
+  `create_file_dialog`) is the sole, reliable way to select files to
+  send, and sends every selected file immediately rather than just
+  filling a path field.
+- **Folder drag-and-drop/zip-or-individual is deliberately deferred** —
+  not built yet, and moot now given the above.
+- Fixed a real bug found via actual multi-file use: a connection
+  card's "send" form permanently disappeared once ANY transfer on
+  that card finished (the check for "is there a transfer to display"
+  didn't also check whether it had already finished) - meaning a
+  second, unrelated send from the same card was impossible without
+  reconnecting. Fixed: once a transfer finishes, the card shows a
+  brief one-line summary of it, then reverts to a fresh send form.
 - `cli.py` does not yet expose several engine/pairing capabilities
   that exist and are tested: `cancel_transfer`, `get_state_snapshot`,
   `quick_share`/`paste_and_connect`, `rename_contact`/`set_alias`, and

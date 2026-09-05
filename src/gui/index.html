@@ -256,17 +256,6 @@
     .conn-card.active { border-left: 2px solid var(--accent); }
     .conn-card.pending { opacity: 0.7; }
     .conn-card.rejected { border-left: 2px solid var(--danger); opacity: 0.7; }
-    .conn-card.drag-over {
-      border: 1px dashed var(--accent);
-      background: rgba(79, 195, 176, 0.06);
-    }
-
-    .drop-hint {
-      font-size: 11px;
-      color: var(--text-dim);
-      font-family: 'IBM Plex Mono', monospace;
-      margin-top: 6px;
-    }
 
     .conn-card-header {
       display: flex;
@@ -782,62 +771,37 @@ function buildConnectionCard(sessionId) {
   if (card.handshakeState === "ok") {
     const pendingOffer = findPendingOfferForSession(sessionId);
     const key = card.currentTransferId ? transferKey(sessionId, card.currentTransferId) : null;
+    const meta = key ? transferMeta[key] : null;
 
     if (pendingOffer) {
       el.appendChild(buildOfferPrompt(pendingOffer));
-    } else if (key && transferMeta[key]) {
+    } else if (meta && !meta.finished) {
       el.appendChild(buildTransferView(sessionId, card.currentTransferId));
     } else {
+      // Either no transfer has happened yet on this card, or the most
+      // recent one already finished - either way, a fresh send form
+      // needs to be available, not permanently blocked by whatever
+      // the last transfer was. If one DID just finish, show a brief
+      // summary of it first so the confirmation isn't lost.
+      if (meta && meta.finished) {
+        el.appendChild(buildFinishedSummary(meta));
+      }
       el.appendChild(buildSendForm(sessionId));
     }
-
-    attachDropHandlers(el, sessionId);
   }
 
   return el;
 }
 
-function attachDropHandlers(el, sessionId) {
-  // Attached to the WHOLE card regardless of what it's currently
-  // showing (idle send form, an active transfer, or an offer prompt) -
-  // send_file() already queues naturally, so dropping mid-transfer is
-  // fine, same as clicking "send" again would be.
-  //
-  // IMPORTANT CAVEAT: dropped_file.path is a non-standard property -
-  // standard web security deliberately does not expose real
-  // filesystem paths from drag-and-drop (same restriction as a
-  // browser <input type=file>). Some embedded-browser environments
-  // expose it anyway as an extension; whether pywebview's WebView2
-  // backend does is NOT confirmed and needs real-machine testing -
-  // this is genuinely uncertain, unlike everything else in this file.
-  // The "browse..." button (pick_files(), a real native OS dialog) is
-  // the GUARANTEED-working alternative regardless of how this turns out.
-  el.addEventListener("dragover", (e) => {
-    e.preventDefault();
-    el.classList.add("drag-over");
-  });
-
-  el.addEventListener("dragleave", () => {
-    el.classList.remove("drag-over");
-  });
-
-  el.addEventListener("drop", (e) => {
-    e.preventDefault();
-    el.classList.remove("drag-over");
-
-    const files = Array.from(e.dataTransfer.files);
-    const missingPath = files.some(f => !f.path);
-
-    if (missingPath || files.length === 0) {
-      alert("Couldn't get a real file path from the drop - try the "
-          + "'browse...' button instead (this environment may not "
-          + "support drag-and-drop file paths).");
-      return;
-    }
-
-    files.forEach(f => window.pywebview.api.send_file(parseInt(sessionId), f.path));
-  });
+function buildFinishedSummary(meta) {
+  const div = document.createElement("div");
+  div.className = "transfer-label";
+  const verb = meta.direction === "outgoing" ? "Sent" : "Received";
+  const word = meta.success ? "done" : "failed/cancelled";
+  div.textContent = `Last: ${verb} ${meta.filename} — ${word}`;
+  return div;
 }
+
 
 function findPendingOfferForSession(sessionId) {
   return Object.values(pendingOffers).find(o => o.session_id === parseInt(sessionId));
@@ -1008,11 +972,6 @@ function buildSendForm(sessionId) {
   row.appendChild(sendBtn);
   row.appendChild(browseBtn);
   wrapper.appendChild(row);
-
-  const hint = document.createElement("div");
-  hint.className = "drop-hint";
-  hint.textContent = "or drag a file onto this card";
-  wrapper.appendChild(hint);
 
   return wrapper;
 }
