@@ -575,6 +575,12 @@
 <script>
 let pendingOffers = {};
 
+// Tracks which (session, transfer) pairs correspond to offers WE
+// received (as opposed to offers we sent) - needed to correctly
+// assign "incoming" vs "outgoing" direction when file_offer_answered
+// arrives, since that event fires on BOTH sides of every offer.
+let offersWeReceived = new Set();
+
 // ---------- Real connection cards + live chunk grid state ----------
 // sessionCards: session_id -> {peerAddr, peerName, handshakeState, currentTransferId}
 // transferMeta: transfer_id -> {sessionId, totalChunks, filename, direction,
@@ -663,14 +669,24 @@ function handleConnectionCardEvent(event) {
     renderConnections();
 
   } else if (event.type === "file_offer_received") {
-    const key = transferKey(event.session_id, event.transfer_id);
-    ensureTransferMeta(key, event.session_id, event.transfer_id, event.filename, "incoming");
+    // Deliberately does NOT create a transferMeta entry yet - only
+    // once we know the offer was actually ACCEPTED (see
+    // file_offer_answered below). Creating one here unconditionally
+    // was the exact cause of a real bug: rejecting an offer left a
+    // permanent, stuck "receiving" card behind, since no chunks would
+    // ever arrive to mark it finished.
+    offersWeReceived.add(transferKey(event.session_id, event.transfer_id));
     renderConnections();
 
   } else if (event.type === "file_offer_answered") {
     if (event.accepted) {
       const key = transferKey(event.session_id, event.transfer_id);
-      ensureTransferMeta(key, event.session_id, event.transfer_id, event.filename, "outgoing");
+      // This event fires on BOTH sides of every offer - use whether
+      // WE were the one who received it to correctly tell "outgoing"
+      // (we sent this file) apart from "incoming" (we're about to
+      // receive it), rather than assuming one or the other.
+      const direction = offersWeReceived.has(key) ? "incoming" : "outgoing";
+      ensureTransferMeta(key, event.session_id, event.transfer_id, event.filename, direction);
       renderConnections();
     }
 
