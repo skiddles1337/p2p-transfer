@@ -3,7 +3,9 @@ contacts.py
 
 Persists saved contacts (people you've connected with before) to disk,
 independent of engine.py or any UI. Each contact stores: name, ip,
-port, passphrase.
+port, passphrase, paired_at (a timestamp - see pairing.py's
+get_contact_freshness() for how this becomes a "this needs re-pairing"
+staleness nudge in the GUI).
 
 Uses the same platformdirs-based approach as storage.py, rather than
 "a JSON file next to the app" (fragile for a packaged, double-clicked
@@ -13,6 +15,7 @@ directory rather than alongside downloads.
 """
 
 import os
+import time
 import platformdirs
 import json_store
 
@@ -23,9 +26,9 @@ CONTACTS_PATH = os.path.join(platformdirs.user_config_dir(APP_NAME, appauthor=Fa
 def load_contacts() -> dict:
     """
     Return all saved contacts as {name: {"ip": ..., "port": ...,
-    "passphrase": ...}}. Returns an empty dict if no contacts file
-    exists yet (first run), or if the file is somehow corrupted -
-    see json_store.safe_load_json for how that's handled.
+    "passphrase": ..., "paired_at": ...}}. Returns an empty dict if no
+    contacts file exists yet (first run), or if the file is somehow
+    corrupted - see json_store.safe_load_json for how that's handled.
     """
     return json_store.safe_load_json(CONTACTS_PATH, default={})
 
@@ -41,9 +44,21 @@ def save_contacts(contacts: dict) -> None:
 
 
 def add_contact(name: str, ip: str, port: int, passphrase: str) -> None:
-    """Add or update (if the name already exists) a single contact."""
+    """
+    Add or update (if the name already exists) a single contact.
+    Always stamps paired_at with the CURRENT time - this is
+    deliberate: re-pairing with someone you already know (e.g. after
+    their IP changed, or just because it's been a while) naturally
+    resets their staleness clock, with no separate "renew" action
+    needed - the act of adding/updating IS the renewal.
+    """
     contacts = load_contacts()
-    contacts[name] = {"ip": ip, "port": port, "passphrase": passphrase}
+    contacts[name] = {
+        "ip": ip,
+        "port": port,
+        "passphrase": passphrase,
+        "paired_at": time.time(),
+    }
     save_contacts(contacts)
 
 
@@ -76,7 +91,9 @@ if __name__ == "__main__":
 
     assert reloaded["Alex"]["ip"] == "82.14.55.10"
     assert reloaded["Sam"]["port"] == 5002
-    print("Contacts match expected values: OK")
+    assert "paired_at" in reloaded["Alex"]
+    assert "paired_at" in reloaded["Sam"]
+    print("Contacts match expected values, paired_at present: OK")
 
     removed = remove_contact("Alex")
     print(f"Removed 'Alex': {removed}")

@@ -503,6 +503,66 @@ fixable):**
   are treated as semi-permanent per relationship, not re-typed each
   time — user's call, may regenerate per session if preferred).
 
+## Contact staleness, identity persistence, and one-click workflows
+(implemented)
+
+**Security model clarified/confirmed:** the passphrase is doing two
+real jobs - gating access (unregistered passphrase = rejected) and
+authenticating the X25519 key exchange (preventing a MITM substituting
+their own key mid-handshake). Its real weakness: it's a static, shared
+bearer secret with no expiration - if `contacts.json` ever leaks from
+either side, whoever has it can impersonate that contact indefinitely
+until manually revoked. A full public-key identity model (each device
+has one long-term keypair; pairing exchanges public keys, not a shared
+secret) would be more correct and eliminate this class of risk
+entirely, but is a genuine architecture change - deliberately NOT done
+now. Instead, staleness tracking (below) adds a hygiene layer on top
+of the existing model: it doesn't fix the underlying weakness, but it
+nudges people toward periodically refreshing trust rather than pairing
+once and never revisiting it.
+
+**Contact staleness (`contacts.py` + `pairing.get_contact_freshness`):**
+every contact now stores a `paired_at` timestamp, refreshed
+automatically any time `add_contact()` is called (including via
+re-pairing - no separate "renew" action needed). `get_contact_freshness()`
+returns whether a contact is "stale" (default: not re-paired in 30
+days, configurable). Being stale does NOT revoke anything - the
+passphrase still works exactly as before - this is a nudge (e.g. a
+yellow GUI badge suggesting "re-pair with this person"), not a hard
+expiration. A contact saved before this feature existed (no
+`paired_at`) is treated as stale by default, on the theory that "we
+don't actually know how old this is" is safer than assuming freshness.
+Verified: fresh right after pairing, correctly flagged stale after
+artificially aging the timestamp, legacy contacts (no timestamp)
+correctly treated as stale, and re-pairing correctly resets the clock.
+
+**`my_identity.py` (new):** persists the user's own display name and
+default listening port, so the one-click sharing workflow below
+doesn't require retyping these every time. Deliberately does NOT
+persist the public IP (always fetched fresh - a cached value would go
+stale silently) or the pairing code (meant to stay short-lived/spoken,
+not a long-term secret).
+
+**Streamlined workflows (`pairing.quick_share` / `pairing.paste_and_connect`,
+new):** replacing a multi-step manual flow with one call each:
+- `quick_share(engine, pairing_code)` - uses saved identity (name,
+  port), fetches a fresh public IP live, starts listening
+  automatically if not already, and generates+registers the invite -
+  all in one call. Returns the string; actual clipboard writing
+  happens at the presentation layer, keeping this function itself
+  UI-independent and testable.
+- `paste_and_connect(engine, clipboard_text, pairing_code)` - parses a
+  received string and CONNECTS IMMEDIATELY, rather than just saving a
+  contact for later browsing - deliberate, since receiving a fresh
+  invite implies intent to connect right now, unlike clicking an old
+  saved contact from a list later.
+
+Verified end-to-end with a real connection: `quick_share` correctly
+auto-started listening on the saved port, generated a valid invite;
+`paste_and_connect` parsed it and connected immediately with zero
+extra steps, correctly identified the peer, and a real file transfer
+completed successfully on top of the resulting session.
+
 ## Pre-GUI engine features (implemented)
 Five pieces of groundwork built before frontend code exists, so the
 GUI is built against a stable command/event shape rather than

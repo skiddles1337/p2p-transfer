@@ -29,8 +29,13 @@ in order, every time.
 """
 
 import secrets
+import time
 import contacts as contacts_module
 import connection_string as connection_string_module
+import my_identity
+import network_info
+
+DEFAULT_STALE_AFTER_DAYS = 30
 
 
 def create_invite(engine, my_name: str, my_ip: str, my_port: int, pairing_code: str) -> str:
@@ -81,6 +86,98 @@ def accept_invite(engine, received_string: str, pairing_code: str):
     contacts_module.add_contact(parsed["name"], parsed["ip"], parsed["port"], parsed["passphrase"])
 
     return parsed
+
+
+def quick_share(engine, pairing_code: str) -> str:
+    """
+    The one-click "copy my info" workflow: uses your saved identity
+    (my_identity.py - name and default port, so nothing needs
+    retyping), fetches a FRESH public IP live rather than trusting any
+    cached value (a stale IP would silently break for whoever receives
+    this), starts listening on your configured port if you aren't
+    already, and generates+registers the invite - all in one call.
+
+    Returns the connection string, ready to copy to the clipboard -
+    actual clipboard writing happens at the presentation layer (GUI),
+    not here, keeping this function itself UI-independent and testable
+    on its own.
+
+    Raises RuntimeError if the public IP can't be determined (no
+    internet connection, all lookup services unreachable) - the
+    caller should catch this and let the person enter their IP
+    manually instead, per network_info.get_public_ip()'s own contract.
+    """
+    identity = my_identity.get_identity()
+    name = identity["name"] or "Me"
+    port = identity["port"]
+
+    if engine.listening_port != port:
+        engine.start_listening(port)
+
+    ip = network_info.get_public_ip()
+    if ip is None:
+        raise RuntimeError(
+            "Could not detect your public IP - check your internet "
+            "connection, or enter your IP manually."
+        )
+
+    return create_invite(engine, name, ip, port, pairing_code)
+
+
+def paste_and_connect(engine, clipboard_text: str, pairing_code: str):
+    """
+    The one-click "paste to connect" workflow on the receiving side:
+    parses the connection string, saves/refreshes the contact (this
+    also resets their staleness clock - see get_contact_freshness), and
+    IMMEDIATELY connects - deliberately different from just saving a
+    contact for later browsing, since pasting a fresh invite implies
+    you want to connect right now, not just file it away.
+
+    Returns the new session_id on success, or None if the string/code
+    didn't work (see connection_string.parse_connection_string for why
+    this doesn't distinguish "wrong code" from "corrupted string").
+    """
+    parsed = accept_invite(engine, clipboard_text, pairing_code)
+    if parsed is None:
+        return None
+
+    return engine.connect_to_peer(
+        parsed["ip"], parsed["port"], parsed["passphrase"], peer_name=parsed["name"]
+    )
+
+
+def get_contact_freshness(name: str, stale_after_days: float = DEFAULT_STALE_AFTER_DAYS) -> dict:
+    """
+    Returns {"exists", "days_since_paired", "is_stale"} for a saved
+    contact - the GUI uses this to show a "needs re-pairing" nudge
+    (e.g. a yellow badge) rather than letting trust silently go stale
+    forever unnoticed.
+
+    IMPORTANT: being "stale" does NOT revoke anything by itself - the
+    passphrase still works exactly as before, since it never
+    auto-expires. This is a hygiene NUDGE, not a hard lockout -
+    re-pairing (running through the invite flow again) naturally
+    resets the clock, since it's just add_contact() being called again
+    with a fresh timestamp - no separate "renew" action needed.
+
+    A contact from before this feature existed (no paired_at stored)
+    is treated as stale, on the theory that "we don't actually know
+    how old this is" is safer to flag than to silently assume fresh.
+    """
+    contact = contacts_module.get_contact(name)
+    if contact is None:
+        return {"exists": False, "days_since_paired": None, "is_stale": None}
+
+    paired_at = contact.get("paired_at")
+    if paired_at is None:
+        return {"exists": True, "days_since_paired": None, "is_stale": True}
+
+    days_since = (time.time() - paired_at) / 86400
+    return {
+        "exists": True,
+        "days_since_paired": days_since,
+        "is_stale": days_since > stale_after_days,
+    }
 
 
 def load_contacts_into_engine(engine) -> int:
