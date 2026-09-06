@@ -86,7 +86,6 @@ def main():
         js_api=bridge,
         width=900,
         height=800,
-        debug=True,
     )
     window_holder["window"] = window
     bridge.set_window(window)
@@ -135,13 +134,11 @@ def main():
 
     window.events.loaded += setup_dom_events
 
-    # debug=True is set on create_window() above (per-window) rather
-    # than here on start() (globally) - an attempt to keep "Inspect"
-    # available via right-click WITHOUT DevTools auto-opening at
-    # launch, which is what happened when it was set here instead.
-    # Genuinely uncertain whether this actually changes that behavior -
-    # pywebview's docs don't clearly distinguish the two - so this
-    # needs real verification, not just assumed to work.
+    # debug=True previously enabled Inspect via right-click, but also
+    # auto-opened DevTools at every launch with no clean way found to
+    # decouple the two (see git history / HISTORY.md for what was
+    # tried). Disabled entirely - simpler than living with the
+    # unwanted auto-open just to keep an occasionally-useful feature.
     webview.start()
 
 
