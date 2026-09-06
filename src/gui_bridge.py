@@ -321,7 +321,18 @@ class Bridge:
         return storage.list_partial_downloads()
 
     def delete_partial_download(self, manifest_path):
-        return storage.delete_partial_download(manifest_path)
+        """
+        Returns {"success": bool, "error": str|None}. A failure here
+        most commonly means the file is still open (part of an active
+        transfer, or locked by some other process) - reported clearly
+        rather than crashing, per storage.delete_partial_download's
+        own documented contract.
+        """
+        try:
+            deleted = storage.delete_partial_download(manifest_path)
+            return {"success": deleted, "error": None}
+        except OSError as e:
+            return {"success": False, "error": str(e)}
 
     def clear_all_data(self):
         """

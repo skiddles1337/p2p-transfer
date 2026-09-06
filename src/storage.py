@@ -371,6 +371,16 @@ def delete_partial_download(manifest_path: str) -> bool:
     Returns True if the manifest existed and was removed, False
     otherwise (mirroring contacts.py/history.py's own True/False
     pattern for "did this actually do something").
+
+    Raises OSError if the files exist but genuinely can't be removed
+    right now - most commonly on Windows, where a file still open by
+    an active transfer (or locked by some other process entirely,
+    like antivirus scanning it) can't be deleted at all, unlike POSIX.
+    Deliberately NOT caught here - the caller needs to know this
+    happened so it can report something meaningful ("this may still be
+    part of an active transfer") rather than the deletion silently
+    failing with no explanation, or the whole app crashing on an
+    unhandled traceback.
     """
     if not os.path.exists(manifest_path):
         return False

@@ -1453,7 +1453,12 @@ function buildPartialRow(entry) {
   discardBtn.textContent = "discard";
   discardBtn.onclick = () => {
     if (!confirm(`Discard the incomplete download of '${entry.filename}'? This deletes what's been received so far - it can't be resumed afterward.`)) return;
-    window.pywebview.api.delete_partial_download(entry.manifest_path).then(refreshPartialDownloads);
+    window.pywebview.api.delete_partial_download(entry.manifest_path).then(result => {
+      if (result.error) {
+        alert("Couldn't discard this file - it may still be part of an active transfer:\n" + result.error);
+      }
+      refreshPartialDownloads();
+    });
   };
   topLine.appendChild(discardBtn);
 
