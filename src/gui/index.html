@@ -599,8 +599,11 @@
     </div>
 
     <div class="section" id="section-history">
-      <h2>History</h2>
-      <p class="placeholder">Not built yet — planned: past transfer log.</p>
+      <div class="section-header-row">
+        <h2>History</h2>
+        <button class="link-btn danger" onclick="clearHistoryList()">clear history</button>
+      </div>
+      <div id="historyListDiv"><p class="empty-note">No transfer history yet.</p></div>
     </div>
 
     <div class="section" id="section-partial">
@@ -653,6 +656,7 @@ function showSection(name, navEl) {
   navEl.classList.add("active");
 
   if (name === "contacts") refreshContacts();
+  if (name === "history") refreshHistoryList();
 }
 
 function onEngineEvent(base64Payload) {
@@ -789,6 +793,20 @@ function handleConnectionCardEvent(event) {
         card.finishedTransferIds.push(event.transfer_id);
       }
     }
+
+    if (meta) {
+      // Uses the ALREADY-correlated data assembled above (filename,
+      // direction, peer name) - the raw event alone only carries
+      // session_id/transfer_id/success/detail, so recreating this
+      // correlation in Python just for history would duplicate work
+      // already done here.
+      const peerName = card ? (card.peerName || "Unknown") : "Unknown";
+      window.pywebview.api.record_history(
+        meta.direction, peerName, meta.filename, meta.totalBytes,
+        event.success, event.detail
+      );
+    }
+
     renderConnections();
   }
 }
@@ -1301,6 +1319,54 @@ function buildContactRow(name, contact) {
   row.appendChild(info);
   row.appendChild(actions);
   return row;
+}
+
+// ---------- History ----------
+
+function refreshHistoryList() {
+  window.pywebview.api.get_history().then(renderHistoryList);
+}
+
+function renderHistoryList(entries) {
+  const div = document.getElementById("historyListDiv");
+  if (entries.length === 0) {
+    div.innerHTML = '<p class="empty-note">No transfer history yet.</p>';
+    return;
+  }
+
+  div.innerHTML = "";
+  entries.forEach(entry => div.appendChild(buildHistoryRow(entry)));
+}
+
+function buildHistoryRow(entry) {
+  const row = document.createElement("div");
+  row.className = "contact-row";
+
+  const info = document.createElement("div");
+  info.className = "info";
+
+  const nameLine = document.createElement("span");
+  nameLine.className = "display-name";
+  const verb = entry.direction === "sent" ? "Sent to" : "Received from";
+  const statusBadge = entry.success ? "" : ' <span class="stale-badge" style="color:var(--danger); border-color:var(--danger);">failed</span>';
+  nameLine.innerHTML = `${verb} ${entry.peer_name}: ${entry.filename}${statusBadge}`;
+
+  const detailLine = document.createElement("span");
+  detailLine.className = "addr";
+  const sizeText = entry.filesize ? (entry.filesize / 1_000_000).toFixed(2) + " MB" : "0 MB";
+  const whenText = new Date(entry.timestamp * 1000).toLocaleString();
+  detailLine.textContent = `${sizeText} — ${whenText}`;
+
+  info.appendChild(nameLine);
+  info.appendChild(detailLine);
+  row.appendChild(info);
+
+  return row;
+}
+
+function clearHistoryList() {
+  if (!confirm("Clear all transfer history? This can't be undone.")) return;
+  window.pywebview.api.clear_history().then(refreshHistoryList);
 }
 
 function logEvent(event) {

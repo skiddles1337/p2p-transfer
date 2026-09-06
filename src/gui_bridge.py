@@ -243,6 +243,27 @@ class Bridge:
     def get_history(self):
         return history_module.load_history()
 
+    def record_history(self, direction, peer_name, filename, filesize, success, detail):
+        """
+        Records one completed transfer. Deliberately called from the
+        FRONTEND (JS), not automatically here on every file_complete
+        event - the frontend already has filename/direction/peer_name
+        fully correlated (via its own transferMeta/sessionCards
+        tracking, built for rendering the connection cards anyway),
+        whereas the raw file_complete event itself only carries
+        session_id/transfer_id/success/detail - recreating that same
+        correlation logic in Python just for history-recording would
+        duplicate work the frontend has already done.
+
+        Accepts "outgoing"/"incoming" (the terminology used everywhere
+        else in this app, including the frontend's own transferMeta) -
+        translated here to history.py's own "sent"/"received" schema,
+        so callers don't need to know about that internal naming
+        difference.
+        """
+        history_direction = "sent" if direction == "outgoing" else "received"
+        history_module.record_transfer(history_direction, peer_name, filename, filesize, success, detail)
+
     def clear_history(self):
         history_module.clear_history()
 
