@@ -14,6 +14,7 @@ import os
 import base64
 import webview
 from gui_bridge import Bridge
+import my_identity
 
 HTML_PATH = os.path.join(os.path.dirname(__file__), "gui", "index.html")
 
@@ -52,6 +53,19 @@ def main():
         window.evaluate_js(f"onEngineEvent('{encoded}')")
 
     bridge = Bridge(push_to_frontend)
+
+    # Auto-listen-on-launch, if the person has turned this on in
+    # Settings - doesn't need the window to exist at all, since
+    # start_listening() is a pure engine call. Wrapped in try/except
+    # since a saved port could genuinely be unavailable (already in
+    # use by something else) - shouldn't prevent the app from opening
+    # at all, just means listening doesn't auto-start this time.
+    identity = my_identity.get_identity()
+    if identity["auto_listen"]:
+        try:
+            bridge.start_listening(identity["port"])
+        except OSError as e:
+            print(f"[gui_app] Auto-listen failed (port {identity['port']}): {e}")
 
     window = webview.create_window(
         "P2P Transfer (dev skeleton)",

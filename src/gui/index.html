@@ -618,7 +618,33 @@
 
     <div class="section" id="section-settings">
       <h2>Settings</h2>
-      <p class="placeholder">Not built yet — planned: default save location, notifications, theme.</p>
+
+      <h3 style="font-family: 'IBM Plex Mono', monospace; font-size: 13px; color: var(--text-dim); margin: 0 0 8px;">Save location</h3>
+      <div class="inline-row">
+        <span id="settingsSaveDir" class="addr" style="flex:1;"></span>
+        <button class="link-btn" onclick="changeSaveFolder()">change</button>
+        <button class="link-btn" onclick="openDownloadsFolder()">open folder</button>
+      </div>
+
+      <h3 style="font-family: 'IBM Plex Mono', monospace; font-size: 13px; color: var(--text-dim); margin: 24px 0 8px;">Startup</h3>
+      <div class="checkbox-inline" style="font-size: 13px;">
+        <input type="checkbox" id="autoListenCheck" onchange="onAutoListenToggle()">
+        Start listening automatically when the app launches
+      </div>
+
+      <h3 style="font-family: 'IBM Plex Mono', monospace; font-size: 13px; color: var(--text-dim); margin: 24px 0 8px;">Contacts backup</h3>
+      <div class="inline-row">
+        <button class="link-btn" onclick="doExportContacts()">export contacts...</button>
+        <button class="link-btn" onclick="doImportContacts()">import contacts...</button>
+      </div>
+
+      <h3 style="font-family: 'IBM Plex Mono', monospace; font-size: 13px; color: var(--danger); margin: 24px 0 8px;">Danger zone</h3>
+      <button class="link-btn danger" onclick="doClearAllData()">clear all data</button>
+      <p class="placeholder" style="padding-top: 4px;">Resets contacts, history, and identity settings back to a fresh
+        install. Does not delete any files you've actually received.</p>
+
+      <p class="placeholder" style="margin-top: 28px; border-top: 1px solid var(--border); padding-top: 16px;">
+        Not yet built: auto-accept per trusted contact, notifications, and a light theme.</p>
     </div>
 
   </div>
@@ -663,6 +689,7 @@ function showSection(name, navEl) {
   if (name === "contacts") refreshContacts();
   if (name === "history") refreshHistoryList();
   if (name === "partial") refreshPartialDownloads();
+  if (name === "settings") refreshSettings();
 }
 
 function onEngineEvent(base64Payload) {
@@ -1447,6 +1474,54 @@ function buildPartialRow(entry) {
   row.appendChild(barOuter);
 
   return row;
+}
+
+// ---------- Settings ----------
+
+function refreshSettings() {
+  window.pywebview.api.get_save_dir().then(dir => {
+    document.getElementById("settingsSaveDir").textContent = dir;
+  });
+  window.pywebview.api.get_identity().then(identity => {
+    document.getElementById("autoListenCheck").checked = identity.auto_listen;
+  });
+}
+
+function onAutoListenToggle() {
+  const checked = document.getElementById("autoListenCheck").checked;
+  window.pywebview.api.set_identity(null, null, null, null, checked);
+}
+
+function doExportContacts() {
+  window.pywebview.api.export_contacts().then(result => {
+    if (result.success) {
+      alert("Contacts exported to:\n" + result.path);
+    } else if (result.error) {
+      alert("Export failed: " + result.error);
+    }
+  });
+}
+
+function doImportContacts() {
+  window.pywebview.api.import_contacts().then(result => {
+    if (result.success) {
+      alert(`Imported ${result.count} contact(s).`);
+      refreshContacts();
+    } else if (result.error) {
+      alert("Import failed: " + result.error);
+    }
+  });
+}
+
+function doClearAllData() {
+  if (!confirm("Clear ALL contacts, history, and identity settings, and close any active connections? " +
+               "This can't be undone. Your actually downloaded files are NOT affected.")) return;
+  window.pywebview.api.clear_all_data().then(() => {
+    loadIdentity();
+    refreshSnapshot();
+    refreshSettings();
+    alert("All data cleared.");
+  });
 }
 
 function logEvent(event) {

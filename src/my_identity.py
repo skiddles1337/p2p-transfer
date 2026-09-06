@@ -32,13 +32,13 @@ import json_store
 APP_NAME = "p2p-transfer"
 IDENTITY_PATH = os.path.join(platformdirs.user_config_dir(APP_NAME, appauthor=False), "identity.json")
 
-_DEFAULTS = {"name": "", "port": 5001, "ip_auto": True, "manual_ip": ""}
+_DEFAULTS = {"name": "", "port": 5001, "ip_auto": True, "manual_ip": "", "auto_listen": False}
 
 
 def get_identity() -> dict:
-    """Return {"name", "port", "ip_auto", "manual_ip"}, falling back to
-    defaults for any field never explicitly set (e.g. a genuine first
-    run)."""
+    """Return {"name", "port", "ip_auto", "manual_ip", "auto_listen"},
+    falling back to defaults for any field never explicitly set (e.g.
+    a genuine first run)."""
     data = json_store.safe_load_json(IDENTITY_PATH, default={})
     merged = dict(_DEFAULTS)
     merged.update(data)
@@ -46,7 +46,8 @@ def get_identity() -> dict:
 
 
 def set_identity(name: str = None, port: int = None,
-                  ip_auto: bool = None, manual_ip: str = None) -> None:
+                  ip_auto: bool = None, manual_ip: str = None,
+                  auto_listen: bool = None) -> None:
     """
     Update any subset of fields, leaving the others untouched if not
     given - so a GUI can save just one field changing (e.g. just the
@@ -62,6 +63,8 @@ def set_identity(name: str = None, port: int = None,
         current["ip_auto"] = ip_auto
     if manual_ip is not None:
         current["manual_ip"] = manual_ip
+    if auto_listen is not None:
+        current["auto_listen"] = auto_listen
     json_store.atomic_write_json(IDENTITY_PATH, current)
 
 
@@ -69,7 +72,8 @@ if __name__ == "__main__":
     print(f"Identity file location: {IDENTITY_PATH}")
 
     print(f"Defaults before anything is set: {get_identity()}")
-    assert get_identity() == {"name": "", "port": 5001, "ip_auto": True, "manual_ip": ""}
+    assert get_identity() == {"name": "", "port": 5001, "ip_auto": True,
+                              "manual_ip": "", "auto_listen": False}
 
     set_identity(name="Alex")
     print(f"After setting only name: {get_identity()}")
@@ -96,6 +100,11 @@ if __name__ == "__main__":
     assert identity["ip_auto"] is True
     assert identity["manual_ip"] == "203.0.113.7"  # preserved, just not active
     print("Manual IP preserved even while auto mode is on: OK")
+
+    print("\n=== auto_listen ===")
+    set_identity(auto_listen=True)
+    assert get_identity()["auto_listen"] is True
+    print("auto_listen correctly persisted: OK")
 
     # Clean slate for next run.
     json_store.atomic_write_json(IDENTITY_PATH, dict(_DEFAULTS))

@@ -35,6 +35,7 @@ import history as history_module
 import my_identity
 import network_info
 import storage
+import json_store
 
 
 class Bridge:
@@ -321,3 +322,82 @@ class Bridge:
 
     def delete_partial_download(self, manifest_path):
         return storage.delete_partial_download(manifest_path)
+
+    def clear_all_data(self):
+        """
+        Resets the app to a fresh-install state: contacts, history,
+        identity settings, and any save-location override are all
+        wiped, and any live sessions/listening are stopped for a
+        genuinely clean state. Deliberately does NOT touch actually
+        downloaded files themselves - those are the person's own
+        files, not app configuration, and shouldn't disappear just
+        because they reset their contacts/history.
+        """
+        contacts_module.save_contacts({})
+        history_module.clear_history()
+        my_identity.set_identity(name="", port=5001, ip_auto=True,
+                                 manual_ip="", auto_listen=False)
+        storage.reset_save_dir()
+
+        snapshot = self.engine.get_state_snapshot()
+        for session_info in snapshot["sessions"]:
+            self.engine.close_session(session_info["session_id"])
+        self.engine.stop_listening()
+
+    def export_contacts(self):
+        """
+        Lets the person save their current contacts to a JSON file of
+        their choosing - e.g. as a backup, or to move to another
+        machine. Uses the native OS save dialog.
+        """
+        if self._window is None:
+            return {"success": False, "error": "No window available"}
+
+        import webview
+        result = self._window.create_file_dialog(
+            webview.SAVE_DIALOG, save_filename="p2p_transfer_contacts.json"
+        )
+        if not result:
+            return {"success": False, "error": None}
+
+        path = result if isinstance(result, str) else result[0]
+        try:
+            data = contacts_module.load_contacts()
+            json_store.atomic_write_json(path, data)
+            return {"success": True, "path": path}
+        except OSError as e:
+            return {"success": False, "error": str(e)}
+
+    def import_contacts(self):
+        """
+        Lets the person load contacts from a previously exported JSON
+        file. Imported entries take precedence over any existing
+        contact with the same name. Crucially, also re-syncs the
+        LIVE engine's known_passphrases afterward - importing alone
+        would only update the saved file, leaving a running engine
+        unable to actually recognize the newly imported contacts
+        until the app happened to restart (the same class of gap
+        pairing.load_contacts_into_engine already exists to prevent
+        at startup).
+        """
+        if self._window is None:
+            return {"success": False, "error": "No window available"}
+
+        import webview
+        result = self._window.create_file_dialog(webview.OPEN_DIALOG)
+        if not result:
+            return {"success": False, "error": None}
+
+        path = result[0]
+        imported = json_store.safe_load_json(path, default=None)
+        if imported is None or not isinstance(imported, dict):
+            return {"success": False, "error": "That file doesn't look like a valid contacts export"}
+
+        try:
+            existing = contacts_module.load_contacts()
+            existing.update(imported)
+            contacts_module.save_contacts(existing)
+            pairing.load_contacts_into_engine(self.engine)
+            return {"success": True, "count": len(imported)}
+        except OSError as e:
+            return {"success": False, "error": str(e)}
