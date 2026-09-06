@@ -60,35 +60,32 @@ find `index.html`, check:
   `hiddenimports` list in the spec file needs another entry; the spec
   file's own comments explain why this can happen
 
-## Step 4: Get the WebView2 bootstrapper
+**Confirmed via a real test:** `P2PTransfer.exe` genuinely needs its
+companion `_internal\` folder present alongside it - moving just the
+`.exe` alone breaks it, moving the whole `dist\P2PTransfer\` folder
+together works correctly. This is normal, expected `--onedir` behavior
+(newer PyInstaller versions bundle most files into `_internal\` rather
+than scattering them directly next to the exe) - not a bug, and not
+something anyone using the final installed app needs to think about,
+since `installer.iss` already copies the entire folder wholesale (see
+its `[Files]` section) rather than singling out the `.exe` alone.
 
-Download the small "Evergreen Bootstrapper" from Microsoft directly:
-https://developer.microsoft.com/microsoft-edge/webview2/
-
-Save it as `MicrosoftEdgeWebview2Setup.exe` inside the `packaging/`
-folder, alongside `installer.iss`.
-
-## Step 5: Install Inno Setup
+## Step 4: Install Inno Setup
 
 Download from: https://jrsoftware.org/isinfo.php
 
-## Step 6: Compile the installer
+## Step 5: Compile the installer
 
 Open `packaging/installer.iss` in the Inno Setup IDE and compile (or
 run `iscc installer.iss` from inside `packaging/` if using the command
 line). This should produce `packaging/Output/P2PTransferSetup.exe`.
 
-## Step 7: Test the installer itself - thoroughly
+## Step 6: Test the installer itself - thoroughly
 
 This is the part most worth being careful about, since none of it has
 ever run before:
 
 - Does it actually install without errors?
-- Does the WebView2 check correctly detect whether it's already
-  present on your machine? Try this on a machine (or a fresh VM) that
-  genuinely doesn't have it, if you can, to confirm the "not
-  installed" branch actually works, not just the "already installed"
-  one.
 - After install, does the app launch correctly from the Start Menu
   shortcut?
 - Check Windows Firewall's settings (Windows Defender Firewall →
@@ -102,6 +99,13 @@ ever run before:
 
 ## Known, accepted limitations (not bugs to fix)
 
+- **No automatic WebView2 check.** An earlier version tried this and
+  got it wrong on a real test - see `installer.iss`'s own comments for
+  what happened. Most machines already have WebView2 (it ships with
+  Windows 11, and reaches most Windows 10 machines via normal
+  updates); the rare person who doesn't can install it manually from
+  https://developer.microsoft.com/microsoft-edge/webview2/ if the app
+  fails to launch.
 - **SmartScreen will likely warn** ("Windows protected your PC") the
   first time someone runs the installer, since it's unsigned. This is
   normal for a personal/indie app without a paid code-signing

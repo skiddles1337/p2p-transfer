@@ -8,10 +8,13 @@
 ;
 ; This produces a single installer .exe that:
 ;   1. Installs the PyInstaller --onedir build to Program Files
-;   2. Checks for the WebView2 runtime, offering to install it if missing
-;   3. Pre-configures a Windows Firewall exception for the app, rather
+;   2. Pre-configures a Windows Firewall exception for the app, rather
 ;      than relying on the reactive runtime prompt
-;   4. Creates a Start Menu shortcut and a proper uninstaller
+;   3. Creates a Start Menu shortcut and a proper uninstaller
+;
+; Does NOT automatically check for/install the WebView2 runtime - an
+; earlier version tried this and got it wrong on a real test (see the
+; note further down for what happened and why it was removed).
 ;
 ; HONEST CAVEAT, upfront: Inno Setup is a Windows-only tool. Nothing in
 ; this file has been compiled or run - I cannot do that from this
@@ -48,14 +51,6 @@ ArchitecturesInstallIn64BitMode=x64
 ; PyInstaller build already having run (dist/P2PTransfer/ exists).
 Source: "..\dist\P2PTransfer\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
-; The WebView2 bootstrapper - download this yourself from Microsoft
-; first (see BUILD.md for the exact link) and place it in this same
-; packaging/ folder before compiling. "dontcopy" means it's bundled
-; INSIDE the installer's own data but not automatically extracted to
-; the install folder - only pulled out to a temp location if the
-; WebView2 check below determines it's actually needed.
-Source: "MicrosoftEdgeWebview2Setup.exe"; DestDir: "{tmp}"; Flags: dontcopy
-
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
@@ -76,33 +71,15 @@ Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: no
 ; on the system after the app itself is gone.
 Filename: "netsh"; Parameters: "advfirewall firewall delete rule name=""{#MyAppName}"""; Flags: runhidden
 
-[Code]
-// Checks for the WebView2 runtime via its registry key. This specific
-// GUID ({F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}) is a widely-documented
-// standard check used by many WebView2-dependent installers - but
-// since I can't inspect a real Windows registry from this sandbox,
-// please verify this genuinely detects WebView2's presence (and,
-// separately, its ABSENCE) correctly on an actual machine before
-// relying on it for real distribution.
-function IsWebView2Installed(): Boolean;
-var
-  Version: String;
-begin
-  Result :=
-    RegQueryStringValue(HKLM, 'SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}', 'pv', Version)
-    or RegQueryStringValue(HKLM, 'SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}', 'pv', Version);
-end;
-
-procedure InitializeWizard();
-var
-  ResultCode: Integer;
-begin
-  if not IsWebView2Installed() then
-  begin
-    if MsgBox('This app requires the Microsoft Edge WebView2 Runtime, which does not appear to be installed. Install it now?', mbConfirmation, MB_YESNO) = IDYES then
-    begin
-      ExtractTemporaryFile('MicrosoftEdgeWebview2Setup.exe');
-      Exec(ExpandConstant('{tmp}\MicrosoftEdgeWebview2Setup.exe'), '/silent /install', '', SW_SHOW, ewWaitUntilTerminated, ResultCode);
-    end;
-  end;
-end;
+; WebView2 detection was removed after real-world testing: the
+; registry-key check incorrectly reported "not installed" on a machine
+; that already had WebView2 (which is the COMMON case - it ships with
+; Windows 11, and reaches most Windows 10 machines via normal
+; updates), triggering an unnecessary bootstrapper run that showed a
+; confusing "already installed" error dialog to what should have been
+; a clean install for most people. Rather than keep guessing at
+; registry specifics that can't be verified without a real Windows
+; machine to test against, this is intentionally left out - the rare
+; person who genuinely lacks WebView2 can be pointed to installing it
+; manually (see README.md), rather than risking this exact failure
+; mode for the majority who already have it.

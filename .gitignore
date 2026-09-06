@@ -4,3 +4,12 @@ __pycache__/
 *.egg-info/
 contacts.json
 received/
+
+# PyInstaller build output - large, regenerable, platform-specific
+# binaries, not source. Never commit these - see packaging/BUILD.md,
+# which regenerates them fresh from packaging/p2p_transfer.spec.
+dist/
+build/
+
+# Inno Setup's compiled installer output (default output folder name).
+packaging/Output/
