@@ -486,8 +486,26 @@ exception to design around.
 
 ## 10. Distribution & installation plan
 
-**Packaging (deferred until the GUI is stable — decisions made now):**
-target is Windows first, via PyInstaller + Inno Setup.
+**Packaging has started** (`packaging/p2p_transfer.spec`,
+`packaging/installer.iss`, `packaging/BUILD.md`) — target is Windows
+first, via PyInstaller + Inno Setup. **Important honest caveat:** this
+whole project has been developed from a Linux sandbox with no way to
+run either tool or test a real Windows executable — both configs are
+careful, best-effort attempts based on well-established patterns for
+each, but none of it has actually been run yet. Real verification (and
+likely a few rounds of fixes) happens on an actual Windows machine —
+see `packaging/BUILD.md` for the full process and what to check at
+each step.
+
+Two real code fixes came out of preparing this, not just config:
+`gui_app.py`'s resource path resolution needed to handle PyInstaller's
+frozen-bundle layout (`sys._MEIPASS`) alongside normal source-run mode,
+and the window title still said "(dev skeleton)" — a leftover from
+Phase 3, cleaned up now that real distribution is in view.
+
+Decisions made:
+- Only `gui_app.py` gets packaged, not `cli.py` — matches the stated
+  target audience (§1); `cli.py` remains a run-from-source tool.
 - **`--onedir`, not `--onefile`.** A single-file build is more
   convenient to send a friend, but self-extracting packed executables
   are meaningfully more likely to trigger antivirus/Windows Defender

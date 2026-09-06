@@ -11,12 +11,25 @@ window and actual JS calls, not just our headless test harness
 """
 
 import os
+import sys
 import base64
 import webview
 from gui_bridge import Bridge
 import my_identity
 
-HTML_PATH = os.path.join(os.path.dirname(__file__), "gui", "index.html")
+# When frozen by PyInstaller, bundled data files (like gui/index.html)
+# live under sys._MEIPASS (a temp extraction dir for --onefile, or the
+# bundle's own folder for --onedir), NOT alongside this script's own
+# __file__ the way they do when running normally from source. Without
+# this check, the built .exe would fail to find index.html at runtime -
+# a real, necessary fix, not just packaging configuration, since this
+# code path only exists once actually frozen.
+if getattr(sys, "frozen", False):
+    BASE_DIR = sys._MEIPASS
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+HTML_PATH = os.path.join(BASE_DIR, "gui", "index.html")
 
 
 def main():
@@ -68,11 +81,12 @@ def main():
             print(f"[gui_app] Auto-listen failed (port {identity['port']}): {e}")
 
     window = webview.create_window(
-        "P2P Transfer (dev skeleton)",
+        "P2P Transfer",
         url=HTML_PATH,
         js_api=bridge,
         width=900,
         height=800,
+        debug=True,
     )
     window_holder["window"] = window
     bridge.set_window(window)
@@ -121,11 +135,14 @@ def main():
 
     window.events.loaded += setup_dom_events
 
-    # debug=True opens dev tools automatically (or makes them
-    # available via right-click) - genuinely useful right now, since
-    # any JS-side error (a typo, a bad selector) would otherwise fail
-    # silently with no visible symptom other than "nothing happened."
-    webview.start(debug=True)
+    # debug=True is set on create_window() above (per-window) rather
+    # than here on start() (globally) - an attempt to keep "Inspect"
+    # available via right-click WITHOUT DevTools auto-opening at
+    # launch, which is what happened when it was set here instead.
+    # Genuinely uncertain whether this actually changes that behavior -
+    # pywebview's docs don't clearly distinguish the two - so this
+    # needs real verification, not just assumed to work.
+    webview.start()
 
 
 if __name__ == "__main__":
