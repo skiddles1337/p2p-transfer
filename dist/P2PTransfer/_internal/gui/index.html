@@ -1,0 +1,1756 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>P2P Transfer</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600&family=IBM+Plex+Sans:wght@400;500&family=IBM+Plex+Mono:wght@400;500&display=swap');
+
+    :root {
+      --bg: #14181C;
+      --surface: #1B2126;
+      --surface-raised: #212830;
+      --accent: #4FC3B0;
+      --success: #6FA8DC;
+      --danger: #C4626B;
+      --text: #E4E9ED;
+      --text-dim: #7C8A94;
+      --border: #2A3238;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'IBM Plex Sans', sans-serif;
+      display: flex;
+      height: 100vh;
+    }
+
+    /* ---------- Sidebar ---------- */
+
+    .sidebar {
+      width: 260px;
+      background: var(--surface);
+      border-right: 1px solid var(--border);
+      padding: 20px;
+      flex-shrink: 0;
+      overflow-y: auto;
+    }
+
+    .sidebar h1 {
+      font-family: 'Space Grotesk', sans-serif;
+      font-size: 16px;
+      font-weight: 600;
+      margin: 0 0 20px;
+      letter-spacing: 0.3px;
+    }
+
+    .field { margin-bottom: 12px; }
+
+    .field label {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      color: var(--text-dim);
+      margin-bottom: 4px;
+      font-family: 'IBM Plex Mono', monospace;
+    }
+
+    .field label .spacer { flex: 1; }
+
+    .field input, .field textarea {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 2px;
+      color: var(--text);
+      padding: 7px 9px;
+      font-size: 13px;
+      font-family: 'IBM Plex Mono', monospace;
+      width: 100%;
+    }
+
+    .field input:read-only {
+      color: var(--text-dim);
+      background: var(--surface-raised);
+    }
+
+    .field textarea { resize: vertical; }
+
+    .ip-port-row {
+      display: flex;
+      gap: 6px;
+    }
+
+    .ip-port-row input.ip { flex: 1; min-width: 0; }
+    .ip-port-row input.port { width: 60px; flex-shrink: 0; }
+
+    .checkbox-inline {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 11px;
+      color: var(--text-dim);
+    }
+
+    .checkbox-inline input { width: auto; padding: 0; }
+
+    button.link-btn {
+      background: none;
+      border: none;
+      color: var(--accent);
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 11px;
+      cursor: pointer;
+      padding: 0;
+    }
+
+    button.link-btn.danger { color: var(--danger); }
+
+    .status-row {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      margin: 16px 0;
+      font-size: 12px;
+      font-family: 'IBM Plex Mono', monospace;
+    }
+
+    .status-row.listening { color: var(--accent); }
+    .status-row.offline { color: var(--text-dim); }
+
+    .status-row #listenToggleBtn {
+      margin-left: auto;
+      border: 1px solid var(--border);
+      border-radius: 2px;
+      padding: 2px 6px;
+    }
+
+    .dot {
+      width: 6px;
+      height: 6px;
+      flex-shrink: 0;
+      background: currentColor;
+    }
+
+    .btn {
+      width: 100%;
+      background: transparent;
+      color: var(--accent);
+      border: 1px solid var(--accent);
+      border-radius: 2px;
+      padding: 9px;
+      font-size: 12px;
+      font-family: 'IBM Plex Mono', monospace;
+      font-weight: 500;
+      cursor: pointer;
+      margin-bottom: 8px;
+      letter-spacing: 0.3px;
+    }
+
+    .btn:hover { background: rgba(79, 195, 176, 0.08); }
+
+    .btn-row {
+      display: flex;
+      gap: 6px;
+    }
+
+    .btn-row .btn { margin-bottom: 0; }
+
+    .field-note {
+      font-size: 11px;
+      color: var(--accent);
+      font-family: 'IBM Plex Mono', monospace;
+      margin-top: 6px;
+      min-height: 14px;
+    }
+
+    .nav {
+      margin-top: 24px;
+      border-top: 1px solid var(--border);
+      padding-top: 16px;
+    }
+
+    .nav-item {
+      padding: 8px 10px;
+      border-radius: 2px;
+      font-size: 13px;
+      color: var(--text-dim);
+      margin-bottom: 2px;
+      border-left: 2px solid transparent;
+      cursor: pointer;
+    }
+
+    .nav-item:hover { color: var(--text); }
+
+    .nav-item.active {
+      background: var(--surface-raised);
+      color: var(--text);
+      border-left: 2px solid var(--accent);
+    }
+
+    /* ---------- Main content ---------- */
+
+    .main {
+      flex: 1;
+      padding: 28px 32px;
+      overflow-y: auto;
+    }
+
+    .main h2 {
+      font-family: 'Space Grotesk', sans-serif;
+      font-size: 18px;
+      font-weight: 600;
+      margin: 0 0 18px;
+    }
+
+    .section-header-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .section-header-row h2 { margin-bottom: 18px; }
+
+    .header-actions {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .section-header-row .link-btn {
+      border: 1px solid var(--border);
+      border-radius: 2px;
+      padding: 4px 10px;
+      margin-bottom: 18px;
+    }
+
+    .section { display: none; }
+    .section.active { display: block; }
+
+    .placeholder {
+      color: var(--text-dim);
+      font-size: 13px;
+      padding: 20px 0;
+    }
+
+    .offer-prompt {
+      background: rgba(79, 195, 176, 0.06);
+      border: 1px solid var(--accent);
+      border-radius: 3px;
+      padding: 10px 14px;
+    }
+
+    .finished-summary {
+      background: var(--surface-raised);
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      padding: 10px 14px;
+      margin-bottom: 12px;
+    }
+
+    .finished-summary .conn-card-header { margin-bottom: 8px; }
+    .finished-summary .chunk-grid { margin-bottom: 0; }
+
+    .rejected-summary {
+      border-color: var(--danger);
+      background: rgba(196, 98, 107, 0.08);
+    }
+
+    .empty-note {
+      color: var(--text-dim);
+      font-size: 13px;
+    }
+
+    /* ---------- Real connection cards ---------- */
+
+    .conn-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      padding: 14px 18px;
+      margin-bottom: 14px;
+    }
+
+    .conn-card.active { border-left: 2px solid var(--accent); }
+    .conn-card.pending { opacity: 0.7; }
+    .conn-card.rejected { border-left: 2px solid var(--danger); opacity: 0.7; }
+
+    .conn-card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 10px;
+    }
+
+    .conn-card-header .peer-name {
+      font-size: 14px;
+      font-weight: 500;
+    }
+
+    .conn-card-header .peer-name.pending,
+    .conn-card-header .peer-name.rejected {
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 12px;
+      color: var(--text-dim);
+    }
+
+    .conn-card-header .close {
+      color: var(--text-dim);
+      cursor: pointer;
+      font-size: 15px;
+      background: none;
+      border: none;
+    }
+
+    .transfer-label {
+      font-size: 12px;
+      color: var(--text-dim);
+      margin-bottom: 8px;
+      font-family: 'IBM Plex Mono', monospace;
+    }
+
+    .chunk-grid {
+      display: grid;
+      grid-template-columns: repeat(30, 1fr);
+      gap: 3px;
+      max-width: 480px;
+      margin-bottom: 8px;
+    }
+
+    .chunk-box {
+      aspect-ratio: 1;
+      border-radius: 1px;
+      background: var(--border);
+    }
+
+    .chunk-box.done { background: var(--success); }
+    .chunk-box.failed { background: var(--danger); }
+
+    .grouped-note {
+      font-size: 10px;
+      color: var(--text-dim);
+      font-family: 'IBM Plex Mono', monospace;
+      margin-bottom: 8px;
+    }
+
+    .transfer-stats {
+      display: flex;
+      gap: 14px;
+      font-size: 11px;
+      color: var(--text-dim);
+      font-family: 'IBM Plex Mono', monospace;
+      margin-bottom: 10px;
+    }
+
+    .conn-card .inline-row {
+      margin-bottom: 0;
+    }
+
+    .drop-zone {
+      margin-top: 8px;
+      padding: 14px;
+      border: 1px dashed var(--border);
+      border-radius: 3px;
+      text-align: center;
+      font-size: 11px;
+      color: var(--text-dim);
+      font-family: 'IBM Plex Mono', monospace;
+    }
+
+    .drop-zone.drag-over {
+      border-color: var(--accent);
+      background: rgba(79, 195, 176, 0.06);
+      color: var(--accent);
+    }
+
+    .conn-card-actions {
+      display: flex;
+      gap: 8px;
+    }
+
+    .conn-card-actions .link-btn {
+      border: 1px solid var(--border);
+      border-radius: 2px;
+      padding: 4px 8px;
+    }
+
+    /* ---------- Contacts ---------- */
+
+    .contact-row {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      padding: 12px 16px;
+      margin-bottom: 10px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .contact-row .info { display: flex; flex-direction: column; gap: 3px; }
+
+    .contact-row .display-name { font-size: 14px; font-weight: 500; }
+
+    .contact-row .addr {
+      font-size: 11px;
+      color: var(--text-dim);
+      font-family: 'IBM Plex Mono', monospace;
+    }
+
+    .contact-row .stale-badge {
+      font-size: 10px;
+      font-family: 'IBM Plex Mono', monospace;
+      color: #D9B54A;
+      border: 1px solid #D9B54A;
+      border-radius: 2px;
+      padding: 1px 5px;
+      margin-left: 8px;
+    }
+
+    .contact-row .actions {
+      display: flex;
+      gap: 6px;
+    }
+
+    .contact-row .actions .link-btn {
+      border: 1px solid var(--border);
+      border-radius: 2px;
+      padding: 4px 8px;
+    }
+
+    /* ---------- Dev/details panel ---------- */
+
+    details.devpanel {
+      margin-top: 28px;
+      border-top: 1px solid var(--border);
+      padding-top: 16px;
+    }
+
+    details.devpanel summary {
+      font-family: 'Space Grotesk', sans-serif;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      color: var(--text-dim);
+    }
+
+    details.devpanel summary:hover { color: var(--text); }
+
+    details.devpanel .devbody { margin-top: 16px; }
+
+    details.devpanel h3 {
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--text-dim);
+      margin: 20px 0 8px;
+      text-transform: none;
+    }
+
+    pre#sessionsDiv {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      padding: 14px 16px;
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 12px;
+      color: var(--text-dim);
+      overflow-x: auto;
+    }
+
+    .inline-row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 12px;
+      flex-wrap: wrap;
+    }
+
+    .inline-row input {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 2px;
+      color: var(--text);
+      padding: 7px 9px;
+      font-size: 13px;
+      font-family: 'IBM Plex Mono', monospace;
+    }
+
+    #logDiv {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      padding: 12px 16px;
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 11px;
+      color: var(--text-dim);
+      line-height: 1.7;
+      height: 220px;
+      overflow-y: auto;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="sidebar">
+    <h1>P2P TRANSFER</h1>
+
+    <div class="field">
+      <label>name</label>
+      <input id="myName" onblur="onNameBlur()">
+    </div>
+
+    <div class="field">
+      <label>
+        ip
+        <span class="checkbox-inline">
+          <input type="checkbox" id="ipAutoCheck" checked onchange="onIpAutoToggle()">
+          auto
+        </span>
+        <button class="link-btn" onclick="refreshIp()">refresh</button>
+        <span class="spacer"></span>
+        <button class="link-btn" id="testPortBtn" onclick="testPort()">test port</button>
+      </label>
+      <div class="ip-port-row">
+        <input class="ip" id="myIp" readonly onblur="onIpBlur()">
+        <input class="port" id="myPort" value="5001" onblur="onPortBlur()">
+      </div>
+    </div>
+
+    <div class="field">
+      <label>pairing_code</label>
+      <input id="pairingCode" value="6666">
+    </div>
+
+    <div class="status-row offline" id="listenStatus">
+      <div class="dot"></div>
+      <span id="listenStatusText">not listening</span>
+      <button class="link-btn" id="listenToggleBtn" onclick="toggleListening()">start</button>
+    </div>
+
+    <div class="field">
+      <label>connection string</label>
+      <textarea id="connectionBox" rows="3" placeholder="Paste a friend's invite here, or use Quick share to generate your own"></textarea>
+    </div>
+    <div class="btn-row">
+      <button class="btn" onclick="doQuickShare()">quick share</button>
+      <button class="btn" onclick="doConnect()">connect</button>
+    </div>
+    <div class="field-note" id="quickShareStatus"></div>
+
+    <div class="nav">
+      <div class="nav-item active" onclick="showSection('connections', this)">Connections</div>
+      <div class="nav-item" onclick="showSection('contacts', this)">Contacts</div>
+      <div class="nav-item" onclick="showSection('history', this)">History</div>
+      <div class="nav-item" onclick="showSection('partial', this)">Partial downloads</div>
+      <div class="nav-item" onclick="showSection('settings', this)">Settings</div>
+    </div>
+  </div>
+
+  <div class="main">
+
+    <div class="section active" id="section-connections">
+      <div class="section-header-row">
+        <h2>Connections</h2>
+        <div class="header-actions">
+          <button class="link-btn" onclick="openDownloadsFolder()" title="Open downloads folder">📂 downloads</button>
+          <button class="link-btn" onclick="changeSaveFolder()" title="Change download location">⚙</button>
+          <button class="link-btn danger" onclick="closeAllConnections()">close all</button>
+        </div>
+      </div>
+      <div id="connectionsListDiv"><p class="empty-note">No active connections.</p></div>
+
+      <details class="devpanel">
+        <summary>Details / dev tools</summary>
+        <div class="devbody">
+
+          <h3>Live snapshot</h3>
+          <button class="btn" style="width:auto; padding:8px 14px;" onclick="refreshSnapshot()">refresh snapshot</button>
+          <pre id="sessionsDiv"></pre>
+
+          <h3>Send a file</h3>
+          <div class="inline-row">
+            <input id="sendSessionId" placeholder="session id" size="10">
+            <input id="sendPath" placeholder="file path" style="flex:1; min-width:300px;">
+            <button class="btn" style="width:auto; padding:8px 14px;" onclick="doSend()">send</button>
+          </div>
+
+          <h3>Cancel a transfer</h3>
+          <div class="inline-row">
+            <input id="cancelSessionId" placeholder="session id" size="10">
+            <input id="cancelTransferId" placeholder="transfer id (hex)" style="flex:1; min-width:300px;">
+            <button class="btn" style="width:auto; padding:8px 14px;" onclick="doCancel()">cancel</button>
+          </div>
+
+          <h3>Raw event log</h3>
+          <div id="logDiv"></div>
+
+        </div>
+      </details>
+    </div>
+
+    <div class="section" id="section-contacts">
+      <h2>Contacts</h2>
+      <div id="contactsListDiv"><p class="empty-note">No saved contacts yet.</p></div>
+    </div>
+
+    <div class="section" id="section-history">
+      <div class="section-header-row">
+        <h2>History</h2>
+        <button class="link-btn danger" onclick="clearHistoryList()">clear history</button>
+      </div>
+      <div id="historyListDiv"><p class="empty-note">No transfer history yet.</p></div>
+    </div>
+
+    <div class="section" id="section-partial">
+      <div class="section-header-row">
+        <h2>Partial downloads</h2>
+        <button class="link-btn" onclick="refreshPartialDownloads()">refresh</button>
+      </div>
+      <p class="placeholder" style="padding-top:0;">Files left incomplete from any session -
+        this app's own or a previous run's. Not yet resumable, but the groundwork is here.</p>
+      <div id="partialListDiv"><p class="empty-note">No incomplete downloads.</p></div>
+    </div>
+
+    <div class="section" id="section-settings">
+      <h2>Settings</h2>
+
+      <h3 style="font-family: 'IBM Plex Mono', monospace; font-size: 13px; color: var(--text-dim); margin: 0 0 8px;">Save location</h3>
+      <div class="inline-row">
+        <span id="settingsSaveDir" class="addr" style="flex:1;"></span>
+        <button class="link-btn" onclick="changeSaveFolder()">change</button>
+        <button class="link-btn" onclick="openDownloadsFolder()">open folder</button>
+      </div>
+
+      <h3 style="font-family: 'IBM Plex Mono', monospace; font-size: 13px; color: var(--text-dim); margin: 24px 0 8px;">Startup</h3>
+      <div class="checkbox-inline" style="font-size: 13px;">
+        <input type="checkbox" id="autoListenCheck" onchange="onAutoListenToggle()">
+        Start listening automatically when the app launches
+      </div>
+
+      <h3 style="font-family: 'IBM Plex Mono', monospace; font-size: 13px; color: var(--text-dim); margin: 24px 0 8px;">Contacts backup</h3>
+      <div class="inline-row">
+        <button class="link-btn" onclick="doExportContacts()">export contacts...</button>
+        <button class="link-btn" onclick="doImportContacts()">import contacts...</button>
+      </div>
+
+      <h3 style="font-family: 'IBM Plex Mono', monospace; font-size: 13px; color: var(--danger); margin: 24px 0 8px;">Danger zone</h3>
+      <button class="link-btn danger" onclick="doClearAllData()">clear all data</button>
+      <p class="placeholder" style="padding-top: 4px;">Resets contacts, history, and identity settings back to a fresh
+        install. Does not delete any files you've actually received.</p>
+
+      <p class="placeholder" style="margin-top: 28px; border-top: 1px solid var(--border); padding-top: 16px;">
+        Not yet built: auto-accept per trusted contact, notifications, and a light theme.</p>
+    </div>
+
+  </div>
+
+<script>
+let pendingOffers = {};
+
+// Tracks which (session, transfer) pairs correspond to offers WE
+// received (as opposed to offers we sent) - needed to correctly
+// assign "incoming" vs "outgoing" direction when file_offer_answered
+// arrives, since that event fires on BOTH sides of every offer.
+let offersWeReceived = new Set();
+
+// transferKey(session_id, transfer_id) -> {filename, sessionId} - for
+// offers WE declined, shown as a persistent, dismissible red summary
+// (see buildRejectedSummary) until manually dismissed.
+let rejectedOffers = {};
+
+// ---------- Real connection cards + live chunk grid state ----------
+// sessionCards: session_id -> {peerAddr, peerName, handshakeState,
+//               activeTransferId, finishedTransferIds, rejectedKeys}
+// transferMeta: transfer_id -> {sessionId, totalChunks, filename, direction,
+//                                expanded, bytesPerSecond, etaSeconds,
+//                                bytesTransferred, totalBytes, finished, success}
+// chunkStatus:  transfer_id -> Uint8Array (0 pending, 1 done, 2 failed) - the
+//               actual source of truth for the grid; box rendering at any
+//               resolution is always DERIVED fresh from this, so toggling
+//               collapsed/expanded is just a re-render, never a data change.
+let sessionCards = {};
+let transferMeta = {};
+let chunkStatus = {};
+
+const COLLAPSED_BOXES = 20;
+const EXPANDED_CAP = 300;
+
+function showSection(name, navEl) {
+  document.querySelectorAll(".section").forEach(el => el.classList.remove("active"));
+  document.getElementById("section-" + name).classList.add("active");
+  document.querySelectorAll(".nav-item").forEach(el => el.classList.remove("active"));
+  navEl.classList.add("active");
+
+  if (name === "contacts") refreshContacts();
+  if (name === "history") refreshHistoryList();
+  if (name === "partial") refreshPartialDownloads();
+  if (name === "settings") refreshSettings();
+}
+
+function onEngineEvent(base64Payload) {
+  const jsonStr = atob(base64Payload);
+  const event = JSON.parse(jsonStr);
+
+  logEvent(event);
+
+  if (event.type === "file_offer_received") {
+    pendingOffers[event.offer_id] = event;
+  }
+
+  if (event.type === "file_offer_answered" || event.type === "file_complete"
+      || event.type === "session_started" || event.type === "session_closed"
+      || event.type === "handshake_result") {
+    refreshSnapshot();
+  }
+
+  handleConnectionCardEvent(event);
+}
+
+// ---------- Connection card event handling (additive, separate from
+// the existing dev-panel/offers logic above) ----------
+
+function transferKey(sessionId, transferId) {
+  // Transfer state (direction, stats) is inherently a PER-SESSION fact,
+  // not a global one - "am I sending or receiving this" only makes
+  // sense from one particular session's perspective. Keying by
+  // transfer_id alone breaks specifically when a single page is
+  // watching BOTH sides of the same transfer (e.g. a self-connect
+  // test), since the sending session's and receiving session's events
+  // would collide on the same shared object - reproduced and fixed
+  // after exactly that scenario surfaced it in testing.
+  return sessionId + ":" + transferId;
+}
+
+function handleConnectionCardEvent(event) {
+  if (event.type === "session_started") {
+    sessionCards[event.session_id] = {
+      peerAddr: event.peer_addr, peerName: null,
+      handshakeState: "pending", activeTransferId: null,
+      finishedTransferIds: [], rejectedKeys: [],
+    };
+    renderConnections();
+
+  } else if (event.type === "handshake_result") {
+    const card = sessionCards[event.session_id];
+    if (!card) return;
+    if (event.success) {
+      card.handshakeState = "ok";
+      card.peerName = event.peer_name;
+      renderConnections();
+    } else {
+      card.handshakeState = "rejected";
+      renderConnections();
+      setTimeout(() => {
+        delete sessionCards[event.session_id];
+        renderConnections();
+      }, 2500);
+    }
+
+  } else if (event.type === "session_closed") {
+    delete sessionCards[event.session_id];
+    renderConnections();
+
+  } else if (event.type === "file_offer_received") {
+    // Deliberately does NOT create a transferMeta entry yet - only
+    // once we know the offer was actually ACCEPTED (see
+    // file_offer_answered below). Creating one here unconditionally
+    // was the exact cause of a real bug: rejecting an offer left a
+    // permanent, stuck "receiving" card behind, since no chunks would
+    // ever arrive to mark it finished.
+    offersWeReceived.add(transferKey(event.session_id, event.transfer_id));
+    renderConnections();
+
+  } else if (event.type === "file_offer_answered") {
+    const key = transferKey(event.session_id, event.transfer_id);
+    if (event.accepted) {
+      // This event fires on BOTH sides of every offer - use whether
+      // WE were the one who received it to correctly tell "outgoing"
+      // (we sent this file) apart from "incoming" (we're about to
+      // receive it), rather than assuming one or the other.
+      const direction = offersWeReceived.has(key) ? "incoming" : "outgoing";
+      ensureTransferMeta(key, event.session_id, event.transfer_id, event.filename, direction);
+      renderConnections();
+    } else if (offersWeReceived.has(key)) {
+      // WE were the one who declined this - show a persistent,
+      // dismissible red summary. (If instead OUR OWN offer got
+      // rejected by someone else, offersWeReceived won't have this
+      // key, and we deliberately don't show a special card for that
+      // here - the send form simply becomes available again.)
+      rejectedOffers[key] = { filename: event.filename, sessionId: event.session_id };
+      const card = sessionCards[event.session_id];
+      if (card && !card.rejectedKeys.includes(key)) {
+        card.rejectedKeys.push(key);
+      }
+      renderConnections();
+    }
+
+  } else if (event.type === "chunk_progress") {
+    const key = transferKey(event.session_id, event.transfer_id);
+    if (!chunkStatus[key]) {
+      chunkStatus[key] = new Uint8Array(event.total_chunks);
+      // Defensive fallback - chunk_progress arriving before we ever saw
+      // the offer/answered event shouldn't normally happen, but this
+      // keeps rendering from breaking if it somehow does.
+      ensureTransferMeta(key, event.session_id, event.transfer_id, "(unknown)",
+                          event.status === "sent" ? "outgoing" : "incoming");
+    }
+    const arr = chunkStatus[key];
+    arr[event.chunk_index] = (event.status === "failed") ? 2 : 1;
+
+    const meta = transferMeta[key];
+    meta.bytesPerSecond = event.bytes_per_second;
+    meta.etaSeconds = event.eta_seconds;
+    meta.bytesTransferred = event.bytes_transferred;
+    meta.totalBytes = event.total_bytes;
+    renderConnections();
+
+  } else if (event.type === "file_complete") {
+    const key = transferKey(event.session_id, event.transfer_id);
+    const meta = transferMeta[key];
+    if (meta) {
+      meta.finished = true;
+      meta.success = event.success;
+      meta.endTimeMs = performance.now();
+    }
+    const card = sessionCards[event.session_id];
+    if (card) {
+      if (card.activeTransferId === event.transfer_id) {
+        card.activeTransferId = null;
+      }
+      if (!card.finishedTransferIds.includes(event.transfer_id)) {
+        card.finishedTransferIds.push(event.transfer_id);
+      }
+    }
+
+    if (meta) {
+      // Uses the ALREADY-correlated data assembled above (filename,
+      // direction, peer name) - the raw event alone only carries
+      // session_id/transfer_id/success/detail, so recreating this
+      // correlation in Python just for history would duplicate work
+      // already done here.
+      const peerName = card ? (card.peerName || "Unknown") : "Unknown";
+      window.pywebview.api.record_history(
+        meta.direction, peerName, meta.filename, meta.totalBytes,
+        event.success, event.detail
+      );
+    }
+
+    renderConnections();
+  }
+}
+
+function ensureTransferMeta(key, sessionId, transferId, filename, direction) {
+  if (!transferMeta[key]) {
+    transferMeta[key] = {
+      sessionId, transferId, filename, direction, expanded: false,
+      bytesPerSecond: null, etaSeconds: null,
+      bytesTransferred: 0, totalBytes: 0,
+      finished: false, success: null,
+      // Recorded client-side (not from the engine) specifically to
+      // compute an average rate and total elapsed time once finished
+      // - startTimeMs at acceptance, endTimeMs at completion.
+      startTimeMs: performance.now(), endTimeMs: null,
+    };
+  } else if (filename !== "(unknown)") {
+    transferMeta[key].filename = filename;
+  }
+  const card = sessionCards[sessionId];
+  if (card) card.activeTransferId = transferId;
+}
+
+function renderConnections() {
+  const div = document.getElementById("connectionsListDiv");
+  const ids = Object.keys(sessionCards);
+
+  if (ids.length === 0) {
+    div.innerHTML = '<p class="empty-note">No active connections.</p>';
+    return;
+  }
+
+  div.innerHTML = "";
+  for (const sessionId of ids) {
+    div.appendChild(buildConnectionCard(sessionId));
+  }
+}
+
+function buildConnectionCard(sessionId) {
+  const card = sessionCards[sessionId];
+  const el = document.createElement("div");
+  el.className = "conn-card " + (
+    card.handshakeState === "pending" ? "pending" :
+    card.handshakeState === "rejected" ? "rejected" : "active"
+  );
+
+  const header = document.createElement("div");
+  header.className = "conn-card-header";
+
+  const nameSpan = document.createElement("span");
+  if (card.handshakeState === "ok") {
+    nameSpan.className = "peer-name";
+    nameSpan.textContent = card.peerName;
+  } else if (card.handshakeState === "rejected") {
+    nameSpan.className = "peer-name rejected";
+    nameSpan.textContent = `Unknown (${card.peerAddr[0]}) — rejected`;
+  } else {
+    nameSpan.className = "peer-name pending";
+    nameSpan.textContent = `Unknown (${card.peerAddr[0]}) — verifying...`;
+  }
+  header.appendChild(nameSpan);
+
+  if (card.handshakeState !== "pending") {
+    const closeBtn = document.createElement("button");
+    closeBtn.className = "close";
+    closeBtn.innerHTML = "&times;";
+    closeBtn.onclick = () => window.pywebview.api.close_session(parseInt(sessionId));
+    header.appendChild(closeBtn);
+  }
+  el.appendChild(header);
+
+  if (card.handshakeState === "ok") {
+    const pendingOffersForSession = findPendingOffersForSession(sessionId);
+    const activeKey = card.activeTransferId ? transferKey(sessionId, card.activeTransferId) : null;
+    const activeMeta = activeKey ? transferMeta[activeKey] : null;
+
+    // Every pending offer for this session gets its own independent
+    // accept/decline prompt, all shown at once - not just the first
+    // one found, and not waiting for an earlier one to be decided.
+    pendingOffersForSession.forEach(offer => {
+      el.appendChild(buildOfferPrompt(offer));
+    });
+
+    if (pendingOffersForSession.length === 0) {
+      if (activeMeta && !activeMeta.finished) {
+        el.appendChild(buildTransferView(sessionId, card.activeTransferId));
+      } else {
+        el.appendChild(buildSendForm(sessionId));
+      }
+    }
+
+    // ALL finished transfers and ALL rejected offers stay listed here,
+    // regardless of what's happening above - each is independently
+    // dismissible, and none get silently replaced by a newer one. This
+    // was a real bug: card.currentTransferId/lastRejectedKey used to
+    // be single slots, so only the MOST RECENT finished/rejected entry
+    // ever showed - a second one silently erased the first before it
+    // could be seen or dismissed.
+    card.finishedTransferIds.forEach(tid => {
+      el.appendChild(buildFinishedSummary(sessionId, tid));
+    });
+    card.rejectedKeys.forEach(key => {
+      el.appendChild(buildRejectedSummary(sessionId, key));
+    });
+  }
+
+  return el;
+}
+
+function buildFinishedSummary(sessionId, transferId) {
+  const key = transferKey(sessionId, transferId);
+  const meta = transferMeta[key];
+
+  const wrapper = document.createElement("div");
+  wrapper.className = "finished-summary";
+
+  const labelRow = document.createElement("div");
+  labelRow.className = "conn-card-header";
+
+  const label = document.createElement("span");
+  label.className = "transfer-label";
+  label.style.marginBottom = "0";
+  const verb = meta.direction === "outgoing" ? "Sent" : "Received";
+  const word = meta.success ? "done" : "failed/cancelled";
+  label.textContent = `${verb} ${meta.filename} — ${word}`;
+
+  const dismissBtn = document.createElement("button");
+  dismissBtn.className = "close";
+  dismissBtn.innerHTML = "&times;";
+  dismissBtn.title = "Dismiss";
+  dismissBtn.onclick = () => {
+    // Only clears THIS specific transfer's record - removes just this
+    // one entry from the list, leaving every other finished/rejected
+    // summary on this card untouched.
+    delete transferMeta[key];
+    delete chunkStatus[key];
+    const card = sessionCards[sessionId];
+    if (card) {
+      const idx = card.finishedTransferIds.indexOf(transferId);
+      if (idx !== -1) card.finishedTransferIds.splice(idx, 1);
+    }
+    renderConnections();
+  };
+
+  labelRow.appendChild(label);
+  labelRow.appendChild(dismissBtn);
+  wrapper.appendChild(labelRow);
+
+  const { container: grid } = renderChunkGrid(key);
+  wrapper.appendChild(grid);
+
+  // Average rate and total elapsed time, computed from timestamps
+  // recorded client-side (at acceptance and at completion) - not
+  // reported by the engine itself, since these are properties of the
+  // WHOLE finished transfer, not any single moment during it.
+  const stats = document.createElement("div");
+  stats.className = "transfer-stats";
+  const durationSec = (meta.endTimeMs != null && meta.startTimeMs != null)
+    ? (meta.endTimeMs - meta.startTimeMs) / 1000 : null;
+  const sizeText = meta.totalBytes ? (meta.totalBytes / 1_000_000).toFixed(2) + " MB" : "";
+  const avgRateText = (durationSec && durationSec > 0 && meta.totalBytes)
+    ? (meta.totalBytes / durationSec / 1_000_000).toFixed(2) + " MB/s avg" : "";
+  const durationText = durationSec != null
+    ? (durationSec < 1 ? "<1s" : Math.round(durationSec) + "s") + " total" : "";
+  stats.innerHTML = `<span>${sizeText}</span><span>${avgRateText}</span><span>${durationText}</span>`;
+  wrapper.appendChild(stats);
+
+  return wrapper;
+}
+
+function buildRejectedSummary(sessionId, key) {
+  const info = rejectedOffers[key];
+  const wrapper = document.createElement("div");
+  wrapper.className = "finished-summary rejected-summary";
+
+  const labelRow = document.createElement("div");
+  labelRow.className = "conn-card-header";
+
+  const label = document.createElement("span");
+  label.className = "transfer-label";
+  label.style.marginBottom = "0";
+  label.textContent = `Rejected: ${info.filename}`;
+
+  const dismissBtn = document.createElement("button");
+  dismissBtn.className = "close";
+  dismissBtn.innerHTML = "&times;";
+  dismissBtn.title = "Dismiss";
+  dismissBtn.onclick = () => {
+    delete rejectedOffers[key];
+    const card = sessionCards[sessionId];
+    if (card) {
+      const idx = card.rejectedKeys.indexOf(key);
+      if (idx !== -1) card.rejectedKeys.splice(idx, 1);
+    }
+    renderConnections();
+  };
+
+  labelRow.appendChild(label);
+  labelRow.appendChild(dismissBtn);
+  wrapper.appendChild(labelRow);
+
+  return wrapper;
+}
+
+
+function findPendingOffersForSession(sessionId) {
+  return Object.values(pendingOffers).filter(o => o.session_id === parseInt(sessionId));
+}
+
+function buildOfferPrompt(offer) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "offer-prompt";
+
+  const label = document.createElement("div");
+  label.className = "transfer-label";
+  label.textContent = `Incoming: '${offer.filename}' (${offer.filesize} bytes)`;
+  wrapper.appendChild(label);
+
+  const actions = document.createElement("div");
+  actions.className = "conn-card-actions";
+
+  const acceptBtn = document.createElement("button");
+  acceptBtn.className = "link-btn";
+  acceptBtn.textContent = "accept";
+  acceptBtn.onclick = () => respondToOffer(offer.offer_id, true);
+
+  const rejectBtn = document.createElement("button");
+  rejectBtn.className = "link-btn danger";
+  rejectBtn.textContent = "reject";
+  rejectBtn.onclick = () => respondToOffer(offer.offer_id, false);
+
+  actions.appendChild(acceptBtn);
+  actions.appendChild(rejectBtn);
+  wrapper.appendChild(actions);
+
+  return wrapper;
+}
+
+function buildTransferView(sessionId, transferId) {
+  const key = transferKey(sessionId, transferId);
+  const meta = transferMeta[key];
+  const wrapper = document.createElement("div");
+
+  const label = document.createElement("div");
+  label.className = "transfer-label";
+  const verb = meta.direction === "outgoing" ? "Sending" : "Receiving";
+  const statusWord = meta.finished
+    ? (meta.success ? "— done" : "— failed/cancelled")
+    : "";
+  label.textContent = `${verb} ${meta.filename} ${statusWord}`;
+  wrapper.appendChild(label);
+
+  const { container: grid, grouped, boxCount } = renderChunkGrid(key);
+  wrapper.appendChild(grid);
+
+  const totalChunks = grid.dataset.totalChunks;
+  if (grouped) {
+    const note = document.createElement("div");
+    note.className = "grouped-note";
+    note.textContent = `showing ${boxCount} of ${totalChunks} chunks, grouped`;
+    wrapper.appendChild(note);
+  }
+
+  if (meta.totalChunks > COLLAPSED_BOXES) {
+    const toggle = document.createElement("button");
+    toggle.className = "link-btn";
+    toggle.textContent = meta.expanded ? "collapse" : "expand";
+    toggle.onclick = () => {
+      meta.expanded = !meta.expanded;
+      renderConnections();
+    };
+    wrapper.appendChild(toggle);
+  }
+
+  const stats = document.createElement("div");
+  stats.className = "transfer-stats";
+  const pct = meta.totalBytes ? Math.round((meta.bytesTransferred / meta.totalBytes) * 100) : 0;
+  const rate = meta.bytesPerSecond ? (meta.bytesPerSecond / 1_000_000).toFixed(2) + " MB/s" : "calculating...";
+  const eta = meta.etaSeconds != null ? Math.round(meta.etaSeconds) + "s remaining" : "";
+  stats.innerHTML = `<span>${pct}%</span><span>${rate}</span><span>${eta}</span>`;
+  wrapper.appendChild(stats);
+
+  if (!meta.finished) {
+    const actions = document.createElement("div");
+    actions.className = "conn-card-actions";
+    const cancelBtn = document.createElement("button");
+    cancelBtn.className = "link-btn danger";
+    cancelBtn.textContent = "cancel";
+    // Backend cancel_transfer() wants the REAL transfer_id (hex string
+    // from the wire protocol), never our internal session:transferId
+    // display key - passing transferId here, not key, is deliberate.
+    cancelBtn.onclick = () => window.pywebview.api.cancel_transfer(parseInt(sessionId), transferId);
+    actions.appendChild(cancelBtn);
+    wrapper.appendChild(actions);
+  }
+
+  return wrapper;
+}
+
+function renderChunkGrid(key) {
+  const meta = transferMeta[key];
+  const statusArr = chunkStatus[key];
+  const total = statusArr ? statusArr.length : 0;
+  meta.totalChunks = total;
+
+  const boxCount = Math.max(1, meta.expanded
+    ? Math.min(total, EXPANDED_CAP)
+    : Math.min(total, COLLAPSED_BOXES));
+  const grouped = boxCount < total;
+
+  const container = document.createElement("div");
+  container.className = "chunk-grid";
+  container.dataset.totalChunks = total;
+
+  if (!statusArr) return { container, grouped: false, boxCount: 0 };
+
+  for (let b = 0; b < boxCount; b++) {
+    const startIdx = Math.floor(b * total / boxCount);
+    const endIdx = Math.floor((b + 1) * total / boxCount);
+    let done = 0, failed = 0;
+    for (let i = startIdx; i < endIdx; i++) {
+      if (statusArr[i] === 1) done++;
+      else if (statusArr[i] === 2) failed++;
+    }
+    const rangeTotal = Math.max(1, endIdx - startIdx);
+
+    const box = document.createElement("div");
+    box.className = "chunk-box";
+    if (failed > 0) {
+      box.classList.add("failed");
+    } else if (done === rangeTotal) {
+      box.classList.add("done");
+    } else if (done > 0) {
+      const pct = Math.round((done / rangeTotal) * 100);
+      box.style.background = `linear-gradient(to right, var(--success) ${pct}%, var(--border) ${pct}%)`;
+    }
+    container.appendChild(box);
+  }
+
+  return { container, grouped, boxCount };
+}
+
+function buildSendForm(sessionId) {
+  const wrapper = document.createElement("div");
+
+  const row = document.createElement("div");
+  row.className = "inline-row";
+
+  const pathInput = document.createElement("input");
+  pathInput.placeholder = "file path";
+  pathInput.style.flex = "1";
+
+  const sendBtn = document.createElement("button");
+  sendBtn.className = "link-btn";
+  sendBtn.textContent = "send";
+  sendBtn.onclick = () => window.pywebview.api.send_file(parseInt(sessionId), pathInput.value);
+
+  const browseBtn = document.createElement("button");
+  browseBtn.className = "link-btn";
+  browseBtn.textContent = "browse...";
+  browseBtn.onclick = () => {
+    // Native OS file picker - returns REAL filesystem paths, unlike a
+    // browser <input type=file>, which deliberately can't. Sends
+    // every selected file immediately rather than just filling the
+    // path box, so picking several files queues them all in one go.
+    window.pywebview.api.pick_files().then(paths => {
+      paths.forEach(p => window.pywebview.api.send_file(parseInt(sessionId), p));
+    });
+  };
+
+  row.appendChild(pathInput);
+  row.appendChild(sendBtn);
+  row.appendChild(browseBtn);
+  wrapper.appendChild(row);
+
+  // Real drag-and-drop target - confirmed working via pywebview's
+  // dedicated DOM-drop-event mechanism (subscribed to in gui_app.py,
+  // NOT here in JS - a JS-side file.path genuinely doesn't work and
+  // was removed earlier; this is a completely different, real
+  // mechanism). This element deliberately has NO interactive children
+  // (no buttons/inputs) so a drop landing anywhere inside it always
+  // reports ITSELF as the event target - gui_app.py reads this
+  // element's id to know which session to route the dropped file(s)
+  // to. dragover/dragleave here are purely cosmetic (highlighting)
+  // and don't need real paths, so handling them in JS is fine - only
+  // the actual 'drop' data extraction needs the Python-side mechanism.
+  const dropZone = document.createElement("div");
+  dropZone.id = "drop-zone-" + sessionId;
+  dropZone.className = "drop-zone";
+  dropZone.textContent = "Drop a file here to send";
+  dropZone.addEventListener("dragover", (e) => {
+    e.preventDefault();
+    dropZone.classList.add("drag-over");
+  });
+  dropZone.addEventListener("dragleave", () => {
+    dropZone.classList.remove("drag-over");
+  });
+  dropZone.addEventListener("drop", (e) => {
+    e.preventDefault();  // stop the browser's default "navigate to file"
+    dropZone.classList.remove("drag-over");
+    // No path extraction here - see gui_app.py's on_dom_drop for the
+    // actual mechanism. This JS handler exists only to prevent the
+    // browser's default behavior and clear the hover style.
+  });
+  wrapper.appendChild(dropZone);
+
+  return wrapper;
+}
+
+// ---------- Contacts ----------
+
+// Mirrors pairing.py's DEFAULT_STALE_AFTER_DAYS - computed client-side
+// directly from paired_at rather than calling get_contact_freshness()
+// once per contact (avoids N extra round-trips for a list). If the
+// Python-side default ever changes, this needs updating to match.
+const STALE_AFTER_DAYS = 30;
+
+function refreshContacts() {
+  window.pywebview.api.get_contacts().then(renderContactsList);
+}
+
+function renderContactsList(contactsDict) {
+  const div = document.getElementById("contactsListDiv");
+  const names = Object.keys(contactsDict);
+
+  if (names.length === 0) {
+    div.innerHTML = '<p class="empty-note">No saved contacts yet.</p>';
+    return;
+  }
+
+  div.innerHTML = "";
+  names.forEach(name => div.appendChild(buildContactRow(name, contactsDict[name])));
+}
+
+function buildContactRow(name, contact) {
+  const row = document.createElement("div");
+  row.className = "contact-row";
+
+  const info = document.createElement("div");
+  info.className = "info";
+
+  const displayName = document.createElement("span");
+  displayName.className = "display-name";
+  displayName.textContent = contact.alias || name;
+
+  const daysSince = contact.paired_at ? (Date.now() / 1000 - contact.paired_at) / 86400 : null;
+  const isStale = daysSince === null || daysSince > STALE_AFTER_DAYS;
+  if (isStale) {
+    const badge = document.createElement("span");
+    badge.className = "stale-badge";
+    badge.textContent = "needs re-pairing";
+    displayName.appendChild(badge);
+  }
+
+  const addr = document.createElement("span");
+  addr.className = "addr";
+  addr.textContent = `${contact.ip}:${contact.port}`;
+
+  info.appendChild(displayName);
+  info.appendChild(addr);
+
+  const actions = document.createElement("div");
+  actions.className = "actions";
+
+  const connectBtn = document.createElement("button");
+  connectBtn.className = "link-btn";
+  connectBtn.textContent = "connect";
+  connectBtn.onclick = () => {
+    if (connectBtn.disabled) return;
+    connectBtn.disabled = true;
+    connectBtn.textContent = "connecting...";
+
+    window.pywebview.api.connect_to_contact(name).then(result => {
+      if (result.success) {
+        refreshSnapshot();
+      } else if (!result.cooldown) {
+        // A genuine error (e.g. the contact was removed) - a cooldown
+        // rejection is expected/harmless from a quick repeated click
+        // and doesn't need an alarming popup for it.
+        alert("Couldn't connect: " + result.error);
+      }
+      setTimeout(() => {
+        connectBtn.disabled = false;
+        connectBtn.textContent = "connect";
+      }, 2000);
+    });
+  };
+
+  const aliasBtn = document.createElement("button");
+  aliasBtn.className = "link-btn";
+  aliasBtn.textContent = "alias";
+  aliasBtn.onclick = () => {
+    const alias = prompt(`Set a local nickname for '${name}' (purely cosmetic, doesn't affect the connection):`, contact.alias || "");
+    if (alias === null) return;
+    window.pywebview.api.set_contact_alias(name, alias || null).then(refreshContacts);
+  };
+
+  const removeBtn = document.createElement("button");
+  removeBtn.className = "link-btn danger";
+  removeBtn.textContent = "remove";
+  removeBtn.onclick = () => {
+    if (!confirm(`Remove '${name}'? They won't be able to connect to you afterward until re-paired.`)) return;
+    window.pywebview.api.remove_contact(name).then(refreshContacts);
+  };
+
+  actions.appendChild(connectBtn);
+  actions.appendChild(aliasBtn);
+  actions.appendChild(removeBtn);
+
+  row.appendChild(info);
+  row.appendChild(actions);
+  return row;
+}
+
+// ---------- History ----------
+
+function refreshHistoryList() {
+  window.pywebview.api.get_history().then(renderHistoryList);
+}
+
+function renderHistoryList(entries) {
+  const div = document.getElementById("historyListDiv");
+  if (entries.length === 0) {
+    div.innerHTML = '<p class="empty-note">No transfer history yet.</p>';
+    return;
+  }
+
+  div.innerHTML = "";
+  entries.forEach(entry => div.appendChild(buildHistoryRow(entry)));
+}
+
+function buildHistoryRow(entry) {
+  const row = document.createElement("div");
+  row.className = "contact-row";
+
+  const info = document.createElement("div");
+  info.className = "info";
+
+  const nameLine = document.createElement("span");
+  nameLine.className = "display-name";
+  const verb = entry.direction === "sent" ? "Sent to" : "Received from";
+  const statusBadge = entry.success ? "" : ' <span class="stale-badge" style="color:var(--danger); border-color:var(--danger);">failed</span>';
+  nameLine.innerHTML = `${verb} ${entry.peer_name}: ${entry.filename}${statusBadge}`;
+
+  const detailLine = document.createElement("span");
+  detailLine.className = "addr";
+  const sizeText = entry.filesize ? (entry.filesize / 1_000_000).toFixed(2) + " MB" : "0 MB";
+  const whenText = new Date(entry.timestamp * 1000).toLocaleString();
+  detailLine.textContent = `${sizeText} — ${whenText}`;
+
+  info.appendChild(nameLine);
+  info.appendChild(detailLine);
+  row.appendChild(info);
+
+  return row;
+}
+
+function clearHistoryList() {
+  if (!confirm("Clear all transfer history? This can't be undone.")) return;
+  window.pywebview.api.clear_history().then(refreshHistoryList);
+}
+
+// ---------- Partial downloads ----------
+
+function refreshPartialDownloads() {
+  window.pywebview.api.get_partial_downloads().then(renderPartialDownloads);
+}
+
+function renderPartialDownloads(entries) {
+  const div = document.getElementById("partialListDiv");
+  if (entries.length === 0) {
+    div.innerHTML = '<p class="empty-note">No incomplete downloads.</p>';
+    return;
+  }
+
+  div.innerHTML = "";
+  entries.forEach(entry => div.appendChild(buildPartialRow(entry)));
+}
+
+function buildPartialRow(entry) {
+  const row = document.createElement("div");
+  row.className = "contact-row";
+  row.style.flexDirection = "column";
+  row.style.alignItems = "stretch";
+
+  const topLine = document.createElement("div");
+  topLine.style.display = "flex";
+  topLine.style.justifyContent = "space-between";
+  topLine.style.alignItems = "center";
+  topLine.style.marginBottom = "8px";
+
+  const info = document.createElement("div");
+  info.className = "info";
+
+  const nameLine = document.createElement("span");
+  nameLine.className = "display-name";
+  nameLine.textContent = entry.filename;
+
+  const detailLine = document.createElement("span");
+  detailLine.className = "addr";
+  const doneSize = (entry.bytes_verified / 1_000_000).toFixed(2);
+  const totalSize = (entry.filesize / 1_000_000).toFixed(2);
+  detailLine.textContent = `${doneSize} / ${totalSize} MB — ${entry.chunks_verified}/${entry.total_chunks} chunks — ${entry.percent}%`;
+
+  info.appendChild(nameLine);
+  info.appendChild(detailLine);
+  topLine.appendChild(info);
+
+  const discardBtn = document.createElement("button");
+  discardBtn.className = "link-btn danger";
+  discardBtn.textContent = "discard";
+  discardBtn.onclick = () => {
+    if (!confirm(`Discard the incomplete download of '${entry.filename}'? This deletes what's been received so far - it can't be resumed afterward.`)) return;
+    window.pywebview.api.delete_partial_download(entry.manifest_path).then(result => {
+      if (result.error) {
+        alert("Couldn't discard this file - it may still be part of an active transfer:\n" + result.error);
+      }
+      refreshPartialDownloads();
+    });
+  };
+  topLine.appendChild(discardBtn);
+
+  row.appendChild(topLine);
+
+  const barOuter = document.createElement("div");
+  barOuter.style.background = "var(--border)";
+  barOuter.style.borderRadius = "2px";
+  barOuter.style.height = "6px";
+  barOuter.style.overflow = "hidden";
+
+  const barInner = document.createElement("div");
+  barInner.style.background = "var(--success)";
+  barInner.style.height = "100%";
+  barInner.style.width = entry.percent + "%";
+
+  barOuter.appendChild(barInner);
+  row.appendChild(barOuter);
+
+  return row;
+}
+
+// ---------- Settings ----------
+
+function refreshSettings() {
+  window.pywebview.api.get_save_dir().then(dir => {
+    document.getElementById("settingsSaveDir").textContent = dir;
+  });
+  window.pywebview.api.get_identity().then(identity => {
+    document.getElementById("autoListenCheck").checked = identity.auto_listen;
+  });
+}
+
+function onAutoListenToggle() {
+  const checked = document.getElementById("autoListenCheck").checked;
+  window.pywebview.api.set_identity(null, null, null, null, checked);
+}
+
+function doExportContacts() {
+  window.pywebview.api.export_contacts().then(result => {
+    if (result.success) {
+      alert("Contacts exported to:\n" + result.path);
+    } else if (result.error) {
+      alert("Export failed: " + result.error);
+    }
+  });
+}
+
+function doImportContacts() {
+  window.pywebview.api.import_contacts().then(result => {
+    if (result.success) {
+      alert(`Imported ${result.count} contact(s).`);
+      refreshContacts();
+    } else if (result.error) {
+      alert("Import failed: " + result.error);
+    }
+  });
+}
+
+function doClearAllData() {
+  if (!confirm("Clear ALL contacts, history, and identity settings, and close any active connections? " +
+               "This can't be undone. Your actually downloaded files are NOT affected.")) return;
+  window.pywebview.api.clear_all_data().then(() => {
+    loadIdentity();
+    refreshSnapshot();
+    refreshSettings();
+    alert("All data cleared.");
+  });
+}
+
+function logEvent(event) {
+  const div = document.getElementById("logDiv");
+  const line = document.createElement("div");
+  line.textContent = JSON.stringify(event);
+  div.appendChild(line);
+  div.scrollTop = div.scrollHeight;
+}
+
+function respondToOffer(offerId, accept) {
+  window.pywebview.api.respond_to_offer(parseInt(offerId), accept).then(() => {
+    delete pendingOffers[offerId];
+    renderConnections();
+  });
+}
+
+// ---------- Identity: auto-save on blur, no explicit save button ----------
+
+function onNameBlur() {
+  window.pywebview.api.set_identity(document.getElementById("myName").value, null, null, null);
+}
+
+function onPortBlur() {
+  const port = parseInt(document.getElementById("myPort").value);
+  window.pywebview.api.set_identity(null, port, null, null);
+}
+
+function onIpBlur() {
+  // Only meaningful in manual mode - the field is read-only while
+  // auto is checked, so this only fires from a genuine user edit.
+  const ip = document.getElementById("myIp").value;
+  window.pywebview.api.set_identity(null, null, null, ip);
+}
+
+function onIpAutoToggle() {
+  const auto = document.getElementById("ipAutoCheck").checked;
+  const ipField = document.getElementById("myIp");
+  ipField.readOnly = auto;
+
+  if (auto) {
+    window.pywebview.api.set_identity(null, null, true, null);
+    refreshIp();
+  } else {
+    // Save whatever's CURRENTLY shown (the last auto-fetched value)
+    // as the starting manual value - don't blank the field, matching
+    // "still displays it" even when switching to manual.
+    window.pywebview.api.set_identity(null, null, false, ipField.value);
+  }
+}
+
+function refreshIp() {
+  window.pywebview.api.get_public_ip().then(result => {
+    if (result.ip) {
+      document.getElementById("myIp").value = result.ip;
+      if (document.getElementById("ipAutoCheck").checked) {
+        window.pywebview.api.set_identity(null, null, null, result.ip);
+      }
+    } else {
+      alert("Couldn't detect your public IP - check your internet connection, " +
+            "or turn off auto and enter it manually.");
+    }
+  });
+}
+
+function testPort() {
+  window.pywebview.api.get_state_snapshot().then(snapshot => {
+    // Prefer the REAL listening port (source of truth) over whatever
+    // the field currently shows - these can drift apart if the field
+    // was edited without restarting the listener (see the field's
+    // own design notes). Fall back to the field's value if not
+    // currently listening at all, so this is still useful before
+    // you've started.
+    const port = snapshot.listening ? snapshot.listening_port
+                                     : document.getElementById("myPort").value;
+
+    navigator.clipboard.writeText(String(port)).then(() => {
+      const btn = document.getElementById("testPortBtn");
+      const original = btn.textContent;
+      btn.textContent = "copied!";
+      setTimeout(() => { btn.textContent = original; }, 1500);
+    }).catch(() => {
+      // Clipboard write failing isn't fatal here either - the person
+      // can still see/type the port manually on the external site.
+    });
+
+    // Deliberately manual/browser-based, not automated - see
+    // network_info.open_port_check_tool()'s own docstring for why.
+    window.pywebview.api.open_port_check_tool();
+  });
+}
+
+function doQuickShare() {
+  const code = document.getElementById("pairingCode").value;
+  window.pywebview.api.quick_share(code).then(result => {
+    if (result.success) {
+      document.getElementById("connectionBox").value = result.invite;
+      refreshSnapshot();
+
+      const statusEl = document.getElementById("quickShareStatus");
+      navigator.clipboard.writeText(result.invite).then(() => {
+        statusEl.textContent = "copied to clipboard";
+        setTimeout(() => { statusEl.textContent = ""; }, 2500);
+      }).catch(() => {
+        // Clipboard write can fail (permissions, focus state) - the
+        // string is still visible in the box either way, so this
+        // isn't a dead end, just a quieter fallback.
+        statusEl.textContent = "couldn't auto-copy - select the text above manually";
+        setTimeout(() => { statusEl.textContent = ""; }, 4000);
+      });
+    } else {
+      alert("Quick share failed: " + result.error);
+    }
+  });
+}
+
+function doConnect() {
+  const text = document.getElementById("connectionBox").value;
+  const code = document.getElementById("pairingCode").value;
+  window.pywebview.api.paste_and_connect(text, code).then(result => {
+    if (result.success) {
+      alert("Connected. session_id = " + result.session_id);
+      refreshSnapshot();
+    } else {
+      alert("Couldn't connect - check the pairing code and the connection string.");
+    }
+  });
+}
+
+function doSend() {
+  const sid = parseInt(document.getElementById("sendSessionId").value);
+  const path = document.getElementById("sendPath").value;
+  window.pywebview.api.send_file(sid, path);
+}
+
+function doCancel() {
+  const sid = parseInt(document.getElementById("cancelSessionId").value);
+  const transferId = document.getElementById("cancelTransferId").value;
+  window.pywebview.api.cancel_transfer(sid, transferId);
+}
+
+function refreshSnapshot() {
+  window.pywebview.api.get_state_snapshot().then(snapshot => {
+    document.getElementById("sessionsDiv").textContent = JSON.stringify(snapshot, null, 2);
+
+    const statusRow = document.getElementById("listenStatus");
+    const statusText = document.getElementById("listenStatusText");
+    const toggleBtn = document.getElementById("listenToggleBtn");
+    if (snapshot.listening) {
+      statusRow.className = "status-row listening";
+      statusText.textContent = "listening :" + snapshot.listening_port;
+      toggleBtn.textContent = "stop";
+    } else {
+      statusRow.className = "status-row offline";
+      statusText.textContent = "not listening";
+      toggleBtn.textContent = "start";
+    }
+  });
+}
+
+function toggleListening() {
+  window.pywebview.api.get_state_snapshot().then(snapshot => {
+    if (snapshot.listening) {
+      // Stopping the listener only affects NEW incoming connections -
+      // it does not touch sessions already connected, which keep
+      // running undisturbed. A separate, more drastic "close all"
+      // action exists for actually ending existing connections - see
+      // closeAllConnections() - deliberately kept apart so stopping
+      // the listener can never accidentally interrupt an in-progress
+      // transfer with an existing friend.
+      window.pywebview.api.stop_listening();
+    } else {
+      const port = parseInt(document.getElementById("myPort").value);
+      window.pywebview.api.start_listening(port);
+    }
+    setTimeout(refreshSnapshot, 200);
+  });
+}
+
+function closeAllConnections() {
+  const sessionIds = Object.keys(sessionCards);
+  if (sessionIds.length === 0) return;
+  if (!confirm(`Close all ${sessionIds.length} active connection(s)? Any in-progress transfers will be interrupted.`)) return;
+  sessionIds.forEach(sid => window.pywebview.api.close_session(parseInt(sid)));
+}
+
+function openDownloadsFolder() {
+  window.pywebview.api.open_save_folder();
+}
+
+function changeSaveFolder() {
+  window.pywebview.api.pick_save_folder().then(result => {
+    if (result.success) {
+      alert("Save location updated to:\n" + result.path);
+    } else if (result.error) {
+      alert("Couldn't use that folder: " + result.error);
+    }
+    // result.error === null means the person just cancelled - no
+    // message needed for that case.
+  });
+}
+
+function loadIdentity() {
+  window.pywebview.api.get_identity().then(identity => {
+    document.getElementById("myName").value = identity.name;
+    document.getElementById("myPort").value = identity.port;
+
+    const autoCheck = document.getElementById("ipAutoCheck");
+    const ipField = document.getElementById("myIp");
+    autoCheck.checked = identity.ip_auto;
+    ipField.readOnly = identity.ip_auto;
+
+    if (identity.ip_auto) {
+      refreshIp();
+    } else {
+      ipField.value = identity.manual_ip;
+    }
+  });
+}
+
+window.addEventListener("pywebviewready", function () {
+  loadIdentity();
+  refreshSnapshot();
+});
+</script>
+</body>
+</html>
