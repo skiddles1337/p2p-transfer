@@ -315,3 +315,9 @@ class Bridge:
             return {"success": True, "path": chosen}
         except OSError as e:
             return {"success": False, "error": str(e)}
+
+    def get_partial_downloads(self):
+        return storage.list_partial_downloads()
+
+    def delete_partial_download(self, manifest_path):
+        return storage.delete_partial_download(manifest_path)

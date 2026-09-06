@@ -607,8 +607,13 @@
     </div>
 
     <div class="section" id="section-partial">
-      <h2>Partial downloads</h2>
-      <p class="placeholder">Not built yet — planned: browsable incomplete transfers, groundwork for resume.</p>
+      <div class="section-header-row">
+        <h2>Partial downloads</h2>
+        <button class="link-btn" onclick="refreshPartialDownloads()">refresh</button>
+      </div>
+      <p class="placeholder" style="padding-top:0;">Files left incomplete from any session -
+        this app's own or a previous run's. Not yet resumable, but the groundwork is here.</p>
+      <div id="partialListDiv"><p class="empty-note">No incomplete downloads.</p></div>
     </div>
 
     <div class="section" id="section-settings">
@@ -657,6 +662,7 @@ function showSection(name, navEl) {
 
   if (name === "contacts") refreshContacts();
   if (name === "history") refreshHistoryList();
+  if (name === "partial") refreshPartialDownloads();
 }
 
 function onEngineEvent(base64Payload) {
@@ -1367,6 +1373,80 @@ function buildHistoryRow(entry) {
 function clearHistoryList() {
   if (!confirm("Clear all transfer history? This can't be undone.")) return;
   window.pywebview.api.clear_history().then(refreshHistoryList);
+}
+
+// ---------- Partial downloads ----------
+
+function refreshPartialDownloads() {
+  window.pywebview.api.get_partial_downloads().then(renderPartialDownloads);
+}
+
+function renderPartialDownloads(entries) {
+  const div = document.getElementById("partialListDiv");
+  if (entries.length === 0) {
+    div.innerHTML = '<p class="empty-note">No incomplete downloads.</p>';
+    return;
+  }
+
+  div.innerHTML = "";
+  entries.forEach(entry => div.appendChild(buildPartialRow(entry)));
+}
+
+function buildPartialRow(entry) {
+  const row = document.createElement("div");
+  row.className = "contact-row";
+  row.style.flexDirection = "column";
+  row.style.alignItems = "stretch";
+
+  const topLine = document.createElement("div");
+  topLine.style.display = "flex";
+  topLine.style.justifyContent = "space-between";
+  topLine.style.alignItems = "center";
+  topLine.style.marginBottom = "8px";
+
+  const info = document.createElement("div");
+  info.className = "info";
+
+  const nameLine = document.createElement("span");
+  nameLine.className = "display-name";
+  nameLine.textContent = entry.filename;
+
+  const detailLine = document.createElement("span");
+  detailLine.className = "addr";
+  const doneSize = (entry.bytes_verified / 1_000_000).toFixed(2);
+  const totalSize = (entry.filesize / 1_000_000).toFixed(2);
+  detailLine.textContent = `${doneSize} / ${totalSize} MB — ${entry.chunks_verified}/${entry.total_chunks} chunks — ${entry.percent}%`;
+
+  info.appendChild(nameLine);
+  info.appendChild(detailLine);
+  topLine.appendChild(info);
+
+  const discardBtn = document.createElement("button");
+  discardBtn.className = "link-btn danger";
+  discardBtn.textContent = "discard";
+  discardBtn.onclick = () => {
+    if (!confirm(`Discard the incomplete download of '${entry.filename}'? This deletes what's been received so far - it can't be resumed afterward.`)) return;
+    window.pywebview.api.delete_partial_download(entry.manifest_path).then(refreshPartialDownloads);
+  };
+  topLine.appendChild(discardBtn);
+
+  row.appendChild(topLine);
+
+  const barOuter = document.createElement("div");
+  barOuter.style.background = "var(--border)";
+  barOuter.style.borderRadius = "2px";
+  barOuter.style.height = "6px";
+  barOuter.style.overflow = "hidden";
+
+  const barInner = document.createElement("div");
+  barInner.style.background = "var(--success)";
+  barInner.style.height = "100%";
+  barInner.style.width = entry.percent + "%";
+
+  barOuter.appendChild(barInner);
+  row.appendChild(barOuter);
+
+  return row;
 }
 
 function logEvent(event) {

@@ -49,6 +49,7 @@ OS-appropriate Downloads location instead:
 """
 
 import os
+import math
 import platformdirs
 import json_store
 
@@ -299,3 +300,87 @@ def finalize_transfer(data_path: str, manifest_path: str,
         os.remove(manifest_path)
 
     return final_path
+
+
+def list_partial_downloads() -> list[dict]:
+    """
+    Scans the staging directory and describes every incomplete
+    download currently sitting there - deliberately NOT limited to
+    transfers active in the CURRENTLY running app instance (see
+    engine.py's get_state_snapshot for that, which only knows about
+    live sessions). This reads whatever is genuinely on disk,
+    including partial downloads left behind by a previous run of the
+    app - closed, crashed, or a transfer that failed/was cancelled.
+
+    Returns a list of {filename, filesize, bytes_verified,
+    total_chunks, chunks_verified, percent, manifest_path, data_path},
+    sorted by percent complete (most-nearly-finished first) - a
+    reasonable default ordering for "what's worth finishing."
+
+    A corrupted or unreadable manifest is skipped rather than crashing
+    the whole listing - same crash-safety philosophy as everywhere
+    else JSON gets read in this app.
+    """
+    staging_dir = get_staging_dir()
+    if not os.path.isdir(staging_dir):
+        return []
+
+    results = []
+    for entry in os.listdir(staging_dir):
+        if not entry.endswith(".json"):
+            continue
+
+        manifest_path = os.path.join(staging_dir, entry)
+        manifest = json_store.safe_load_json(manifest_path, default=None)
+        if manifest is None:
+            continue  # corrupted/unreadable - skip, don't crash the listing
+
+        filename = manifest.get("filename", "unknown")
+        filesize = manifest.get("filesize", 0)
+        chunk_size = manifest.get("chunk_size", 0)
+        verified_chunks = manifest.get("verified_chunks", [])
+
+        total_chunks = math.ceil(filesize / chunk_size) if chunk_size > 0 and filesize > 0 else 0
+        # The last chunk is often smaller than chunk_size, so a naive
+        # "verified_count * chunk_size" can overshoot the real file
+        # size slightly - capped here so percent never exceeds 100.
+        bytes_verified = min(len(verified_chunks) * chunk_size, filesize) if chunk_size > 0 else 0
+        percent = round((bytes_verified / filesize) * 100) if filesize > 0 else 0
+
+        data_path = os.path.join(staging_dir, entry[:-len(".json")] + ".part")
+
+        results.append({
+            "filename": filename,
+            "filesize": filesize,
+            "bytes_verified": bytes_verified,
+            "total_chunks": total_chunks,
+            "chunks_verified": len(verified_chunks),
+            "percent": percent,
+            "manifest_path": manifest_path,
+            "data_path": data_path,
+        })
+
+    results.sort(key=lambda r: r["percent"], reverse=True)
+    return results
+
+
+def delete_partial_download(manifest_path: str) -> bool:
+    """
+    Deletes one specific partial download - both its .part data file
+    and .json manifest - e.g. for a "discard" action in the GUI.
+    Returns True if the manifest existed and was removed, False
+    otherwise (mirroring contacts.py/history.py's own True/False
+    pattern for "did this actually do something").
+    """
+    if not os.path.exists(manifest_path):
+        return False
+
+    if manifest_path.endswith(".json"):
+        data_path = manifest_path[:-len(".json")] + ".part"
+        try:
+            os.remove(data_path)
+        except FileNotFoundError:
+            pass
+
+    os.remove(manifest_path)
+    return True
