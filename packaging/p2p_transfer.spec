@@ -1,16 +1,15 @@
 # p2p_transfer.spec
 #
 # PyInstaller spec file for building the Windows distribution.
-# Run from the PROJECT ROOT (not from inside packaging/) with:
+# Run from the PROJECT ROOT with:
 #     pyinstaller packaging/p2p_transfer.spec
 #
-# All paths below are written relative to the project root, matching
-# that invocation - if the build fails immediately with a "file not
-# found" error for gui_app.py, that's the first thing to check: some
-# PyInstaller versions resolve spec-file-relative paths relative to
-# the spec file's own folder instead of the CWD. Can't verify which
-# behavior applies without actually running PyInstaller on Windows,
-# which isn't possible from this sandbox at all.
+# CONFIRMED (via a real build attempt, not assumed): PyInstaller
+# resolves this spec file's relative paths relative to the SPEC
+# FILE'S OWN FOLDER (packaging/), not the current working directory
+# you ran the command from - even though the command itself is run
+# from the project root. All paths below are written as "../src/..."
+# to account for this.
 #
 # Deliberately --onedir (a folder), NOT --onefile (a single packed
 # exe) - see docs/DESIGN.md / docs/HISTORY.md for why: single-file
@@ -38,11 +37,11 @@
 block_cipher = None
 
 a = Analysis(
-    ['src/gui_app.py'],
-    pathex=['src'],
+    ['../src/gui_app.py'],
+    pathex=['../src'],
     binaries=[],
     datas=[
-        ('src/gui', 'gui'),  # bundles the whole gui/ folder (index.html) alongside the exe
+        ('../src/gui', 'gui'),  # bundles the whole gui/ folder (index.html) alongside the exe
     ],
     hiddenimports=[
         'webview.platforms.winforms',

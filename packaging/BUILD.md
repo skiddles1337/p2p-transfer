@@ -39,12 +39,10 @@ pyinstaller packaging/p2p_transfer.spec
 This should produce `dist/P2PTransfer/` containing `P2PTransfer.exe`
 and everything it needs alongside it.
 
-**If this fails immediately** with a "file not found" error mentioning
-`gui_app.py` - the spec file's paths assume PyInstaller resolves them
-relative to your current directory (the project root) when invoked
-this way. If that assumption is wrong for your PyInstaller version,
-try running the command from inside `packaging/` instead, or edit the
-paths in `p2p_transfer.spec` directly.
+(Confirmed via a real build attempt: PyInstaller resolves this spec
+file's paths relative to the spec file's own folder, not your current
+directory - the spec file already accounts for this, so running the
+command as written above should just work.)
 
 ## Step 3: Test the built .exe directly, before wrapping it in an installer
 
